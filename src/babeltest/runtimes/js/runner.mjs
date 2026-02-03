@@ -208,6 +208,12 @@ async function tryFactory(className, modulePath) {
 
 /**
  * Get or create an instance of a class.
+ *
+ * Resolution order:
+ * 1. Check instance cache
+ * 2. Try forTesting() static method
+ * 3. Try factory in babel/factories/
+ * 4. Try zero-arg constructor
  */
 async function getInstance(cls, className, modulePath) {
   const cacheKey = `${modulePath}.${className}`;
@@ -217,14 +223,22 @@ async function getInstance(cls, className, modulePath) {
     return instanceCache.get(cacheKey);
   }
 
-  // Try factory
-  const instance = await tryFactory(className, modulePath);
-  if (instance) {
+  // 1. Try forTesting() static method (preferred convention)
+  if (typeof cls.forTesting === 'function') {
+    debug(`Using ${className}.forTesting()`);
+    const instance = await cls.forTesting();
     instanceCache.set(cacheKey, instance);
     return instance;
   }
 
-  // Try zero-arg constructor
+  // 2. Try factory in babel/factories/
+  const factoryInstance = await tryFactory(className, modulePath);
+  if (factoryInstance) {
+    instanceCache.set(cacheKey, factoryInstance);
+    return factoryInstance;
+  }
+
+  // 3. Try zero-arg constructor
   try {
     const newInstance = new cls();
     instanceCache.set(cacheKey, newInstance);
@@ -232,7 +246,7 @@ async function getInstance(cls, className, modulePath) {
   } catch (e) {
     throw new Error(
       `Cannot construct ${className}: ${e.message}. ` +
-      `Create a factory function in ${config.factoriesPath}/${modulePath.split('/').pop()}.js`
+      `Add a static forTesting() method, create a factory in ${config.factoriesPath}/, or add a zero-arg constructor.`
     );
   }
 }

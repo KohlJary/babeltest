@@ -394,9 +394,10 @@ class PythonAdapter(Adapter):
 
         Resolution order:
         1. Check instance cache (respects lifecycle setting)
-        2. Look for factory function in babel/factories/
-        3. Try zero-arg constructor
-        4. Raise ConstructionError with helpful message
+        2. Try for_testing() static/class method
+        3. Look for factory function in babel/factories/
+        4. Try zero-arg constructor
+        5. Raise ConstructionError with helpful message
         """
         from babeltest.config import InstanceLifecycle
 
@@ -406,15 +407,23 @@ class PythonAdapter(Adapter):
             if class_path in self._instance_cache:
                 return self._instance_cache[class_path]
 
-        # Try factory (with diagnostic tracking)
         ctx = DiagnosticContext(target=class_path)
+
+        # 1. Try for_testing() static/class method (preferred convention)
+        instance = self._try_for_testing(cls, ctx)
+        if instance is not None:
+            if self._lifecycle != InstanceLifecycle.PER_TEST:
+                self._instance_cache[class_path] = instance
+            return instance
+
+        # 2. Try factory in babel/factories/
         instance = self._try_factory(class_path, cls, ctx)
         if instance is not None:
             if self._lifecycle != InstanceLifecycle.PER_TEST:
                 self._instance_cache[class_path] = instance
             return instance
 
-        # Try zero-arg constructor
+        # 3. Try zero-arg constructor
         instance, error = self._try_zero_arg(cls)
         if instance is not None:
             ctx.add_search(f"{cls.__name__}() (zero-arg constructor)", found=True)
@@ -428,10 +437,42 @@ class PythonAdapter(Adapter):
         parts = class_path.split(".")
         module_path = ".".join(parts[:-1])
 
+        ctx.add_suggestion(f"Add a @staticmethod or @classmethod named 'for_testing()' to {cls.__name__}")
         ctx.add_suggestion(suggest_factory_creation(cls.__name__, module_path, self.config.factories))
         ctx.add_suggestion(f"Add a zero-argument constructor to {cls.__name__}")
 
         raise ConstructionError(f"Cannot construct {cls.__name__}", context=ctx)
+
+    def _try_for_testing(self, cls: type, ctx: DiagnosticContext) -> Any | None:
+        """Try to invoke for_testing() static/class method.
+
+        Convention: Classes can define a static or class method named 'for_testing'
+        that returns a test-ready instance with mock dependencies.
+
+        Example:
+            class UserService:
+                def __init__(self, db: Database):
+                    self.db = db
+
+                @staticmethod
+                def for_testing() -> "UserService":
+                    return UserService(db=MockDatabase())
+        """
+        if hasattr(cls, "for_testing"):
+            factory = getattr(cls, "for_testing")
+            if callable(factory):
+                try:
+                    instance = factory()
+                    ctx.add_search(f"{cls.__name__}.for_testing()", found=True)
+                    if self.debug_mode:
+                        print(f"[DEBUG] Using {cls.__name__}.for_testing()")
+                    return instance
+                except Exception as e:
+                    ctx.add_search(f"{cls.__name__}.for_testing()", found=False, reason=str(e))
+        else:
+            ctx.add_search(f"{cls.__name__}.for_testing()", found=False, reason="method not found")
+
+        return None
 
     def _try_factory(self, class_path: str, cls: type, ctx: DiagnosticContext) -> Any | None:
         """Try to find and invoke a factory function for this class.

@@ -367,6 +367,16 @@ public class Program
         return null;
     }
 
+    /// <summary>
+    /// Get or create an instance of a class.
+    ///
+    /// Resolution order:
+    /// 1. Check instance cache
+    /// 2. Try ForTesting() static method
+    /// 3. Try constructor with mocked parameters
+    /// 4. Try factory
+    /// 5. Try parameterless constructor
+    /// </summary>
     private static async Task<object> GetInstance(Type type)
     {
         var cacheKey = type.FullName ?? type.Name;
@@ -376,7 +386,34 @@ public class Program
             return cached;
         }
 
-        // Check if any constructor parameters have mocks - if so, create with mocks
+        // 1. Try ForTesting() static method (preferred convention)
+        var forTestingMethod = type.GetMethod("ForTesting", BindingFlags.Public | BindingFlags.Static);
+        if (forTestingMethod != null && forTestingMethod.GetParameters().Length == 0)
+        {
+            Debug($"Using {type.Name}.ForTesting()");
+            object? instance;
+
+            if (forTestingMethod.ReturnType.IsAssignableTo(typeof(Task)))
+            {
+                // Async factory
+                var task = (Task)forTestingMethod.Invoke(null, null)!;
+                await task;
+                var resultProp = task.GetType().GetProperty("Result");
+                instance = resultProp?.GetValue(task);
+            }
+            else
+            {
+                instance = forTestingMethod.Invoke(null, null);
+            }
+
+            if (instance != null)
+            {
+                InstanceCache[cacheKey] = instance;
+                return instance;
+            }
+        }
+
+        // 2. Check if any constructor parameters have mocks - if so, create with mocks
         var ctors = type.GetConstructors();
         foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length))
         {
@@ -421,7 +458,7 @@ public class Program
             }
         }
 
-        // Try factory
+        // 3. Try factory
         var factoryInstance = await TryFactory(type);
         if (factoryInstance != null)
         {
@@ -429,7 +466,7 @@ public class Program
             return factoryInstance;
         }
 
-        // Try parameterless constructor
+        // 4. Try parameterless constructor
         var defaultCtor = type.GetConstructor(Type.EmptyTypes);
         if (defaultCtor != null)
         {
@@ -438,7 +475,9 @@ public class Program
             return instance;
         }
 
-        throw new Exception($"Cannot construct {type.Name}: no parameterless constructor and no factory found");
+        throw new Exception(
+            $"Cannot construct {type.Name}: Add a static ForTesting() method, " +
+            $"create a factory, or add a parameterless constructor.");
     }
 
     private static object? GetMockForType(Type interfaceType)
