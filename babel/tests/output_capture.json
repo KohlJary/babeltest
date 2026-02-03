@@ -1,0 +1,23 @@
+{
+  "version": "0.1",
+  "tests": [
+    {
+      "target": "example.with_output.noisy_add",
+      "description": "captures stdout on passing test",
+      "given": { "a": 2, "b": 3 },
+      "expect": { "type": "exact", "value": 5 }
+    },
+    {
+      "target": "example.with_output.prints_and_returns",
+      "description": "captures output and returns value",
+      "given": { "message": "hello world" },
+      "expect": { "type": "exact", "value": "hello world" }
+    },
+    {
+      "target": "example.with_output.failing_with_output",
+      "description": "captures stdout/stderr on expected exception",
+      "given": { "value": 42 },
+      "throws": { "type": "ValueError", "message": "Cannot process 42" }
+    }
+  ]
+}

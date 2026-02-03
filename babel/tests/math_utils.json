@@ -1,0 +1,54 @@
+{
+  "version": "0.1",
+  "suites": [],
+  "tests": [
+    {
+      "target": "example.math_utils.add",
+      "description": "adds two positive numbers",
+      "given": { "a": 2, "b": 3 },
+      "expect": { "type": "exact", "value": 5 }
+    },
+    {
+      "target": "example.math_utils.add",
+      "description": "adds negative numbers",
+      "given": { "a": -1, "b": -1 },
+      "expect": { "type": "exact", "value": -2 }
+    },
+    {
+      "target": "example.math_utils.add",
+      "description": "adds zero",
+      "given": { "a": 0, "b": 0 },
+      "expect": { "type": "exact", "value": 0 }
+    },
+    {
+      "target": "example.math_utils.subtract",
+      "description": "subtracts two numbers",
+      "given": { "a": 10, "b": 3 },
+      "expect": { "type": "exact", "value": 7 }
+    },
+    {
+      "target": "example.math_utils.divide",
+      "description": "divides two numbers",
+      "given": { "a": 10.0, "b": 2.0 },
+      "expect": { "type": "exact", "value": 5.0 }
+    },
+    {
+      "target": "example.math_utils.divide",
+      "description": "throws on divide by zero",
+      "given": { "a": 10.0, "b": 0.0 },
+      "throws": { "type": "ValueError", "message": "divide by zero" }
+    },
+    {
+      "target": "example.math_utils.is_even",
+      "description": "returns true for even numbers",
+      "given": { "n": 4 },
+      "expect": { "type": "true" }
+    },
+    {
+      "target": "example.math_utils.is_even",
+      "description": "returns false for odd numbers",
+      "given": { "n": 3 },
+      "expect": { "type": "false" }
+    }
+  ]
+}

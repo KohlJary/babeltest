@@ -1,0 +1,10 @@
+# BabelTest configuration
+version: "0.1"
+
+adapters:
+  python:
+    # Capture stdout/stderr during test execution
+    capture_output: true
+
+    # Instance lifecycle: shared | per_test | per_suite
+    instance_lifecycle: shared

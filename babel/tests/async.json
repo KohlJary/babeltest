@@ -1,0 +1,33 @@
+{
+  "version": "0.1",
+  "tests": [
+    {
+      "target": "example.async_funcs.async_add",
+      "description": "async function returns correct result",
+      "given": { "a": 5, "b": 3 },
+      "expect": { "type": "exact", "value": 8 }
+    },
+    {
+      "target": "example.async_funcs.async_fetch_data",
+      "description": "async function with nested return value",
+      "given": { "key": "user" },
+      "expect": {
+        "type": "contains",
+        "value": { "id": 1, "name": "Kohl" }
+      }
+    },
+    {
+      "target": "example.async_funcs.async_slow_operation",
+      "description": "async function completes within timeout",
+      "given": { "delay_ms": 50 },
+      "timeout_ms": 500,
+      "expect": { "type": "exact", "value": "completed after 50ms" }
+    },
+    {
+      "target": "example.async_funcs.async_failing",
+      "description": "async function throws expected error",
+      "given": {},
+      "throws": { "type": "ValueError", "message": "Async operation failed" }
+    }
+  ]
+}
