@@ -116,8 +116,8 @@ public class Program
         {
             var (obj, method) = await Resolve(test.Target);
 
-            // Build parameters
-            var parameters = BuildParameters(method, test.Given);
+            // Build parameters with type coercion
+            var parameters = BuildParameters(method, test.Given, test.Types);
 
             // Check if this method call is mocked
             var mockResult = CheckForMock(test.Target, parameters);
@@ -523,7 +523,7 @@ public class Program
         return null;
     }
 
-    private static object?[] BuildParameters(MethodInfo method, Dictionary<string, JsonElement>? given)
+    private static object?[] BuildParameters(MethodInfo method, Dictionary<string, JsonElement>? given, Dictionary<string, string>? types = null)
     {
         var methodParams = method.GetParameters();
         var args = new object?[methodParams.Length];
@@ -539,19 +539,42 @@ public class Program
             var paramName = param.Name ?? $"arg{i}";
 
             // Try exact name match first, then case-insensitive
-            if (!given.TryGetValue(paramName, out var value))
+            JsonElement value = default;
+            string? matchedKey = null;
+            if (given.TryGetValue(paramName, out value))
+            {
+                matchedKey = paramName;
+            }
+            else
             {
                 var key = given.Keys.FirstOrDefault(k =>
                     string.Equals(k, paramName, StringComparison.OrdinalIgnoreCase));
                 if (key != null)
                 {
                     value = given[key];
+                    matchedKey = key;
                 }
             }
 
             if (value.ValueKind != JsonValueKind.Undefined)
             {
-                args[i] = ConvertValue(value, param.ParameterType);
+                // Check for type hint
+                string? typeHint = null;
+                if (matchedKey != null && types != null)
+                {
+                    if (!types.TryGetValue(matchedKey, out typeHint))
+                    {
+                        // Try case-insensitive
+                        var typeKey = types.Keys.FirstOrDefault(k =>
+                            string.Equals(k, matchedKey, StringComparison.OrdinalIgnoreCase));
+                        if (typeKey != null)
+                        {
+                            typeHint = types[typeKey];
+                        }
+                    }
+                }
+
+                args[i] = ConvertValueWithTypeHint(value, param.ParameterType, typeHint);
             }
             else if (param.HasDefaultValue)
             {
@@ -560,6 +583,59 @@ public class Program
         }
 
         return args;
+    }
+
+    /// <summary>
+    /// Convert a JSON value to a target type, optionally using a type hint.
+    /// </summary>
+    private static object? ConvertValueWithTypeHint(JsonElement element, Type targetType, string? typeHint)
+    {
+        if (typeHint == null)
+        {
+            return ConvertValue(element, targetType);
+        }
+
+        // Apply type coercion based on hint
+        return typeHint.ToLowerInvariant() switch
+        {
+            "int" => element.ValueKind == JsonValueKind.Number
+                ? element.GetInt32()
+                : int.Parse(element.GetString() ?? "0"),
+
+            "float" => element.ValueKind == JsonValueKind.Number
+                ? (float)element.GetDouble()
+                : float.Parse(element.GetString() ?? "0"),
+
+            "decimal" => element.ValueKind == JsonValueKind.Number
+                ? element.GetDecimal()
+                : decimal.Parse(element.GetString() ?? "0"),
+
+            "string" => element.ValueKind == JsonValueKind.String
+                ? element.GetString()
+                : element.GetRawText(),
+
+            "bool" => element.ValueKind == JsonValueKind.True || element.ValueKind == JsonValueKind.False
+                ? element.GetBoolean()
+                : bool.Parse(element.GetString() ?? "false"),
+
+            "datetime" => element.ValueKind == JsonValueKind.String
+                ? DateTime.Parse(element.GetString()!)
+                : throw new InvalidOperationException($"Cannot convert {element.ValueKind} to datetime"),
+
+            "date" => element.ValueKind == JsonValueKind.String
+                ? DateOnly.Parse(element.GetString()!)
+                : throw new InvalidOperationException($"Cannot convert {element.ValueKind} to date"),
+
+            "time" => element.ValueKind == JsonValueKind.String
+                ? TimeOnly.Parse(element.GetString()!)
+                : throw new InvalidOperationException($"Cannot convert {element.ValueKind} to time"),
+
+            "uuid" => element.ValueKind == JsonValueKind.String
+                ? Guid.Parse(element.GetString()!)
+                : throw new InvalidOperationException($"Cannot convert {element.ValueKind} to uuid"),
+
+            _ => ConvertValue(element, targetType)
+        };
     }
 
     private static object? ConvertValue(JsonElement element, Type targetType)
@@ -874,6 +950,7 @@ public class TestSpec
     public string Target { get; set; } = "";
     public string? Description { get; set; }
     public Dictionary<string, JsonElement>? Given { get; set; }
+    public Dictionary<string, string>? Types { get; set; }
     public Expectation? Expect { get; set; }
     public ThrowsExpectation? Throws { get; set; }
     public int? TimeoutMs { get; set; }

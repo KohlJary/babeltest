@@ -62,7 +62,7 @@ test_clause: given_clause
 // GIVEN clause
 // ============================================================================
 
-given_clause: "GIVEN" object
+given_clause: "GIVEN" typed_object
 
 // ============================================================================
 // EXPECT clause
@@ -119,9 +119,10 @@ mock_returns: "RETURNS" value
 mock_throws: "THROWS" throws_spec
 
 // ============================================================================
-// Values (JSON-like)
+// Values (JSON-like with optional type hints in GIVEN objects)
 // ============================================================================
 
+// Base values (without type hints)
 ?value: object
       | array
       | STRING
@@ -131,15 +132,25 @@ mock_throws: "THROWS" throws_spec
       | "null"        -> null
       | param_ref
 
+// Regular object (used in most places)
 object: "{" [pair ("," pair)*] ","? "}"
-
 pair: key ":" value
-
 key: NAME | STRING
+
+// Typed object specifically for GIVEN clause
+// Supports: { amount: 99.95 AS decimal }
+typed_object: "{" [typed_pair ("," typed_pair)*] ","? "}"
+typed_pair: key ":" typed_value
+typed_value: value [type_hint]
+type_hint: "AS" TYPE_NAME
 
 array: "[" [value ("," value)*] ","? "]"
 
 param_ref: "$" NAME
+
+// Supported type names for AS clause
+TYPE_NAME: "int" | "float" | "decimal" | "string" | "bool"
+         | "datetime" | "date" | "time" | "uuid"
 
 // ============================================================================
 // Identifiers

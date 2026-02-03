@@ -52,6 +52,7 @@ class TestSpec(BaseModel):
     target: str  # What to test (e.g., "UserService.get_by_id")
     description: str | None = None  # Human-readable description
     given: dict[str, Any] = Field(default_factory=dict)  # Input parameters
+    types: dict[str, str] = Field(default_factory=dict)  # Type hints for given params
     expect: Expectation | None = None  # Return value assertion
     throws: ThrowsExpectation | None = None  # Exception assertion
     mocks: list[MockSpec] = Field(default_factory=list)  # Mock definitions

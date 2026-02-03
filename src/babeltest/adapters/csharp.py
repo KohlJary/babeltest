@@ -212,6 +212,7 @@ class CSharpAdapter(Adapter):
                     "target": test.target,
                     "description": test.description,
                     "given": test.given,
+                    "types": test.types,
                     "expect": test.expect.model_dump() if test.expect else None,
                     "throws": test.throws.model_dump() if test.throws else None,
                     "timeout_ms": test.timeout_ms,
