@@ -48,14 +48,58 @@ class PythonAdapterConfig(BaseModel):
         return v
 
 
+class JSAdapterConfig(BaseModel):
+    """Configuration for the JavaScript/Node.js adapter."""
+
+    node_path: str | None = None
+    """Path to Node.js executable. If None, uses 'node' from PATH."""
+
+    factories: str = "babel/factories"
+    """Directory containing factory functions."""
+
+    module_type: str = "auto"
+    """Module type: 'esm', 'cjs', or 'auto' (detect from package.json)."""
+
+    capture_output: bool = False
+    """Capture stdout/stderr during test execution."""
+
+    timeout_ms: int | None = None
+    """Default timeout for all tests (can be overridden per-test)."""
+
+    debug_mode: bool = False
+    """Enable verbose debug output."""
+
+
+class CSharpAdapterConfig(BaseModel):
+    """Configuration for the C#/.NET adapter."""
+
+    dotnet_path: str | None = None
+    """Path to dotnet executable. If None, uses 'dotnet' from PATH."""
+
+    project_path: str | None = None
+    """Path to the .csproj file to test. If None, searches current directory."""
+
+    factories: str = "babel/factories"
+    """Directory containing factory classes."""
+
+    capture_output: bool = False
+    """Capture stdout/stderr during test execution."""
+
+    timeout_ms: int | None = None
+    """Default timeout for all tests (can be overridden per-test)."""
+
+    debug_mode: bool = False
+    """Enable verbose debug output."""
+
+
 class AdaptersConfig(BaseModel):
     """Configuration for all adapters."""
 
     python: PythonAdapterConfig = Field(default_factory=PythonAdapterConfig)
-
-    # Future adapters
-    # javascript: JavaScriptAdapterConfig = Field(default_factory=JavaScriptAdapterConfig)
-    # csharp: CSharpAdapterConfig = Field(default_factory=CSharpAdapterConfig)
+    javascript: JSAdapterConfig = Field(default_factory=JSAdapterConfig)
+    js: JSAdapterConfig = Field(default_factory=JSAdapterConfig)  # Alias
+    csharp: CSharpAdapterConfig = Field(default_factory=CSharpAdapterConfig)
+    cs: CSharpAdapterConfig = Field(default_factory=CSharpAdapterConfig)  # Alias
 
 
 class BabelTestConfig(BaseModel):

@@ -53,3 +53,10 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# .NET / C#
+bin/
+obj/
+*.dll
+*.pdb
+*.cache

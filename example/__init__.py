@@ -1,1 +1,1 @@
-"""Example application code for testing BabelTest."""
+"""Example package for BabelTest - unified target paths."""

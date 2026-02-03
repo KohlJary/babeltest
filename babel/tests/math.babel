@@ -1,0 +1,34 @@
+# BabelTest math utilities - runs on any adapter
+# Target: example.math
+
+TEST example.math.add AS "adds two positive numbers"
+  GIVEN { a: 2, b: 3 }
+  EXPECT 5
+
+TEST example.math.add AS "adds negative numbers"
+  GIVEN { a: -1, b: -1 }
+  EXPECT -2
+
+TEST example.math.add AS "adds zero"
+  GIVEN { a: 0, b: 0 }
+  EXPECT 0
+
+TEST example.math.subtract AS "subtracts two numbers"
+  GIVEN { a: 10, b: 3 }
+  EXPECT 7
+
+TEST example.math.divide AS "divides two numbers"
+  GIVEN { a: 10.0, b: 4.0 }
+  EXPECT 2.5
+
+TEST example.math.divide AS "throws on divide by zero"
+  GIVEN { a: 10.0, b: 0.0 }
+  THROWS { message: "divide by zero" }
+
+TEST example.math.is_even AS "returns true for even numbers"
+  GIVEN { n: 4 }
+  EXPECT TRUE
+
+TEST example.math.is_even AS "returns false for odd numbers"
+  GIVEN { n: 3 }
+  EXPECT FALSE

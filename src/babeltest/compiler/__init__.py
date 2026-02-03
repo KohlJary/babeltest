@@ -1,5 +1,27 @@
 """BabelTest compiler - transforms .babel files to IR."""
 
-from babeltest.compiler.ir import TestSpec, SuiteSpec, Expectation, ExpectationType
+from babeltest.compiler.ir import (
+    Expectation,
+    ExpectationType,
+    IRDocument,
+    MockSpec,
+    SuiteSpec,
+    TestSpec,
+    ThrowsExpectation,
+)
+from babeltest.compiler.parser import BabelParser, parse, parse_file
 
-__all__ = ["TestSpec", "SuiteSpec", "Expectation", "ExpectationType"]
+__all__ = [
+    # IR models
+    "Expectation",
+    "ExpectationType",
+    "IRDocument",
+    "MockSpec",
+    "SuiteSpec",
+    "TestSpec",
+    "ThrowsExpectation",
+    # Parser
+    "BabelParser",
+    "parse",
+    "parse_file",
+]

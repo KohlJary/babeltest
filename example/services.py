@@ -1,21 +1,8 @@
-"""Example services with dependencies - tests DI/factory pattern."""
+"""Example services - unified target: example.services"""
 
 from dataclasses import dataclass
-from typing import Protocol
 
 
-# Protocols for dependencies
-class Database(Protocol):
-    def get_user(self, user_id: int) -> dict | None: ...
-    def save_user(self, user: dict) -> dict: ...
-
-
-class Logger(Protocol):
-    def info(self, message: str) -> None: ...
-    def error(self, message: str) -> None: ...
-
-
-# Domain models
 @dataclass
 class User:
     id: int
@@ -24,44 +11,30 @@ class User:
     active: bool = True
 
 
-# Service with dependencies
 class UserService:
-    """User service that requires database and logger."""
-
-    def __init__(self, db: Database, logger: Logger):
-        self._db = db
-        self._logger = logger
+    def __init__(self):
+        self._users = [
+            User(id=1, name="Kohl", email="kohl@example.com", active=True),
+            User(id=2, name="Alice", email="alice@example.com", active=True),
+        ]
 
     def get_by_id(self, user_id: int) -> User | None:
-        """Get a user by ID."""
-        self._logger.info(f"Fetching user {user_id}")
-        data = self._db.get_user(user_id)
-        if data is None:
-            return None
-        return User(**data)
+        return next((u for u in self._users if u.id == user_id), None)
 
     def create(self, name: str, email: str) -> User:
-        """Create a new user."""
-        self._logger.info(f"Creating user: {name}")
-        data = self._db.save_user({"name": name, "email": email, "active": True})
-        return User(**data)
+        user = User(id=len(self._users) + 1, name=name, email=email, active=True)
+        self._users.append(user)
+        return user
 
     def deactivate(self, user_id: int) -> bool:
-        """Deactivate a user. Returns True if user existed."""
         user = self.get_by_id(user_id)
         if user is None:
-            self._logger.error(f"User {user_id} not found")
             return False
         user.active = False
-        self._db.save_user({"id": user.id, "name": user.name, "email": user.email, "active": False})
-        self._logger.info(f"Deactivated user {user_id}")
         return True
 
 
-# Service without dependencies (zero-arg constructor)
 class Calculator:
-    """Simple calculator - no DI needed."""
-
     def add(self, a: int, b: int) -> int:
         return a + b
 
