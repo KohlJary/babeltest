@@ -46,6 +46,21 @@ class MockSpec(BaseModel):
     throws: ThrowsExpectation | None = None  # Exception to raise
 
 
+class CalledAssertion(BaseModel):
+    """Assertion that a method was called (spy verification)."""
+
+    target: str  # What should have been called (e.g., "EmailService.send")
+    with_args: dict[str, Any] | None = None  # Expected arguments (partial match)
+    times: int | None = None  # Expected call count (None = at least once)
+
+
+class MutatesSpec(BaseModel):
+    """Side-effect assertions for a test."""
+
+    called: list[CalledAssertion] = Field(default_factory=list)
+    # Future: emitted, query
+
+
 class TestSpec(BaseModel):
     """A single test case specification."""
 
@@ -56,6 +71,7 @@ class TestSpec(BaseModel):
     expect: Expectation | None = None  # Return value assertion
     throws: ThrowsExpectation | None = None  # Exception assertion
     mocks: list[MockSpec] = Field(default_factory=list)  # Mock definitions
+    mutates: MutatesSpec | None = None  # Side-effect assertions
     timeout_ms: int | None = None  # Timeout in milliseconds
 
 

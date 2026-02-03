@@ -163,9 +163,12 @@ class PythonAdapter(Adapter):
         return method(**params)
 
     def run_test(self, test: TestSpec) -> TestResult:
-        """Run a test with mock support.
+        """Run a test with mock and spy support.
 
-        Overrides base implementation to install mocks before test execution.
+        Overrides base implementation to:
+        - Install mocks before test execution
+        - Install spies for CALLED assertions
+        - Verify CALLED assertions after execution
         """
         import time
 
@@ -197,6 +200,22 @@ class PythonAdapter(Adapter):
                         duration_ms=duration_ms,
                     )
 
+            # Install spies for CALLED assertions that don't have corresponding mocks
+            if test.mutates:
+                for called in test.mutates.called:
+                    if called.target not in mock_objects:
+                        try:
+                            spy = self._install_spy(stack, called.target)
+                            mock_objects[called.target] = spy
+                        except Exception as e:
+                            duration_ms = (time.perf_counter() - start) * 1000
+                            return TestResult(
+                                test=test,
+                                status=ResultStatus.ERROR,
+                                message=f"Failed to install spy for {called.target}: {e}",
+                                duration_ms=duration_ms,
+                            )
+
             try:
                 capture.start()
 
@@ -224,6 +243,21 @@ class PythonAdapter(Adapter):
                         duration_ms=duration_ms,
                         logs=logs,
                     )
+
+                # Check CALLED assertions (MUTATES)
+                if test.mutates:
+                    passed, message = self._verify_called_assertions(
+                        test.mutates.called, mock_objects
+                    )
+                    if not passed:
+                        return TestResult(
+                            test=test,
+                            status=ResultStatus.FAILED,
+                            message=message,
+                            actual_value=result,
+                            duration_ms=duration_ms,
+                            logs=logs,
+                        )
 
                 # Check return value assertion
                 if test.expect:
@@ -343,6 +377,132 @@ class PythonAdapter(Adapter):
         # The target is already in the right format
         return target
 
+    def _install_spy(self, stack: ExitStack, target: str) -> MagicMock:
+        """Install a spy (passthrough mock) for tracking calls.
+
+        Unlike regular mocks, spies call through to the real implementation
+        while recording call information.
+
+        Args:
+            stack: ExitStack to manage the patch lifecycle
+            target: Target path to spy on
+
+        Returns:
+            The MagicMock spy object
+        """
+        patch_target = self._resolve_mock_path(target)
+
+        if self.debug_mode:
+            print(f"[DEBUG] Installing spy: {target} -> {patch_target}")
+
+        # Create a spy that wraps the original
+        # We use wraps= to call through to the original while recording calls
+        # First, resolve the original callable
+        try:
+            parts = target.rsplit(".", 1)
+            if len(parts) == 2:
+                module_path, attr_name = parts
+                module = importlib.import_module(module_path)
+                original = getattr(module, attr_name, None)
+
+                if original is not None:
+                    spy = MagicMock(wraps=original)
+                else:
+                    # If we can't find original, just create a tracking mock
+                    spy = MagicMock()
+            else:
+                spy = MagicMock()
+        except (ImportError, AttributeError):
+            # Fall back to simple spy
+            spy = MagicMock()
+
+        patcher = patch(patch_target, spy)
+        stack.enter_context(patcher)
+
+        return spy
+
+    def _verify_called_assertions(
+        self,
+        assertions: list[Any],
+        mock_objects: dict[str, MagicMock],
+    ) -> tuple[bool, str | None]:
+        """Verify CALLED assertions against mock/spy call records.
+
+        Args:
+            assertions: List of CalledAssertion objects
+            mock_objects: Dictionary mapping target paths to mock objects
+
+        Returns:
+            Tuple of (passed, error_message)
+        """
+        from babeltest.compiler.ir import CalledAssertion
+
+        for assertion in assertions:
+            if not isinstance(assertion, CalledAssertion):
+                continue
+
+            mock_obj = mock_objects.get(assertion.target)
+            if mock_obj is None:
+                return False, f"No mock/spy found for CALLED target: {assertion.target}"
+
+            # Check call count
+            call_count = mock_obj.call_count
+            if assertion.times is not None:
+                if call_count != assertion.times:
+                    return False, (
+                        f"CALLED {assertion.target}: expected {assertion.times} call(s), "
+                        f"got {call_count}"
+                    )
+            else:
+                # At least once
+                if call_count == 0:
+                    return False, f"CALLED {assertion.target}: expected to be called, but was not"
+
+            # Check arguments if specified
+            if assertion.with_args is not None:
+                # Check if any call matches the expected arguments
+                matched = False
+                for call in mock_obj.call_args_list:
+                    args, kwargs = call
+                    # Check if expected args are a subset of actual kwargs
+                    if self._args_match(assertion.with_args, args, kwargs):
+                        matched = True
+                        break
+
+                if not matched:
+                    actual_calls = [
+                        f"({', '.join(repr(a) for a in call.args)}, {call.kwargs})"
+                        for call in mock_obj.call_args_list
+                    ]
+                    return False, (
+                        f"CALLED {assertion.target} WITH {assertion.with_args}: "
+                        f"no matching call found. Actual calls: {actual_calls}"
+                    )
+
+        return True, None
+
+    def _args_match(
+        self,
+        expected: dict[str, Any],
+        actual_args: tuple[Any, ...],
+        actual_kwargs: dict[str, Any],
+    ) -> bool:
+        """Check if expected arguments match actual call arguments.
+
+        Supports partial matching - expected args must be a subset of actual.
+        """
+        # Check if expected keys are in kwargs
+        for key, expected_val in expected.items():
+            if key in actual_kwargs:
+                if actual_kwargs[key] != expected_val:
+                    return False
+            else:
+                # Key not in kwargs - can't match
+                # (Could extend to check positional args by parameter name)
+                return False
+
+        return True
+
     def _find_exception_class(self, exc_type: str, mock_target: str | None = None) -> type:
         """Find an exception class by name.
 
@@ -394,9 +554,10 @@ class PythonAdapter(Adapter):
 
         Resolution order:
         1. Check instance cache (respects lifecycle setting)
-        2. Look for factory function in babel/factories/
-        3. Try zero-arg constructor
-        4. Raise ConstructionError with helpful message
+        2. Try for_testing() static/class method
+        3. Look for factory function in babel/factories/
+        4. Try zero-arg constructor
+        5. Raise ConstructionError with helpful message
         """
         from babeltest.config import InstanceLifecycle
 
@@ -406,15 +567,23 @@ class PythonAdapter(Adapter):
             if class_path in self._instance_cache:
                 return self._instance_cache[class_path]
 
-        # Try factory (with diagnostic tracking)
         ctx = DiagnosticContext(target=class_path)
+
+        # 1. Try for_testing() static/class method (preferred convention)
+        instance = self._try_for_testing(cls, ctx)
+        if instance is not None:
+            if self._lifecycle != InstanceLifecycle.PER_TEST:
+                self._instance_cache[class_path] = instance
+            return instance
+
+        # 2. Try factory in babel/factories/
         instance = self._try_factory(class_path, cls, ctx)
         if instance is not None:
             if self._lifecycle != InstanceLifecycle.PER_TEST:
                 self._instance_cache[class_path] = instance
             return instance
 
-        # Try zero-arg constructor
+        # 3. Try zero-arg constructor
         instance, error = self._try_zero_arg(cls)
         if instance is not None:
             ctx.add_search(f"{cls.__name__}() (zero-arg constructor)", found=True)
@@ -428,10 +597,42 @@ class PythonAdapter(Adapter):
         parts = class_path.split(".")
         module_path = ".".join(parts[:-1])
 
+        ctx.add_suggestion(f"Add a @staticmethod or @classmethod named 'for_testing()' to {cls.__name__}")
         ctx.add_suggestion(suggest_factory_creation(cls.__name__, module_path, self.config.factories))
         ctx.add_suggestion(f"Add a zero-argument constructor to {cls.__name__}")
 
         raise ConstructionError(f"Cannot construct {cls.__name__}", context=ctx)
+
+    def _try_for_testing(self, cls: type, ctx: DiagnosticContext) -> Any | None:
+        """Try to invoke for_testing() static/class method.
+
+        Convention: Classes can define a static or class method named 'for_testing'
+        that returns a test-ready instance with mock dependencies.
+
+        Example:
+            class UserService:
+                def __init__(self, db: Database):
+                    self.db = db
+
+                @staticmethod
+                def for_testing() -> "UserService":
+                    return UserService(db=MockDatabase())
+        """
+        if hasattr(cls, "for_testing"):
+            factory = getattr(cls, "for_testing")
+            if callable(factory):
+                try:
+                    instance = factory()
+                    ctx.add_search(f"{cls.__name__}.for_testing()", found=True)
+                    if self.debug_mode:
+                        print(f"[DEBUG] Using {cls.__name__}.for_testing()")
+                    return instance
+                except Exception as e:
+                    ctx.add_search(f"{cls.__name__}.for_testing()", found=False, reason=str(e))
+        else:
+            ctx.add_search(f"{cls.__name__}.for_testing()", found=False, reason="method not found")
+
+        return None
 
     def _try_factory(self, class_path: str, cls: type, ctx: DiagnosticContext) -> Any | None:
         """Try to find and invoke a factory function for this class.

@@ -149,7 +149,7 @@ class JSAdapter(Adapter):
         start = time.perf_counter()
 
         try:
-            # Send test to runner (including mocks and type hints)
+            # Send test to runner (including mocks, type hints, and mutates)
             result = self._send_command({
                 "action": "run",
                 "test": {
@@ -161,6 +161,7 @@ class JSAdapter(Adapter):
                     "throws": test.throws.model_dump() if test.throws else None,
                     "timeout_ms": test.timeout_ms,
                     "mocks": [m.model_dump() for m in test.mocks] if test.mocks else [],
+                    "mutates": test.mutates.model_dump() if test.mutates else None,
                 },
             })
 

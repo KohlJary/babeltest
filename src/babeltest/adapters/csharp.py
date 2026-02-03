@@ -217,6 +217,7 @@ class CSharpAdapter(Adapter):
                     "throws": test.throws.model_dump() if test.throws else None,
                     "timeout_ms": test.timeout_ms,
                     "mocks": [m.model_dump() for m in test.mocks] if test.mocks else [],
+                    "mutates": test.mutates.model_dump() if test.mutates else None,
                 },
             })
 
