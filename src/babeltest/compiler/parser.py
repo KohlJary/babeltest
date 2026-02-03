@@ -68,6 +68,7 @@ class BabelTransformer(Transformer[Any, Any]):
                         target=suite.target + test.target,
                         description=test.description,
                         given=test.given,
+                        types=test.types,
                         expect=test.expect,
                         throws=test.throws,
                         mocks=test.mocks,
@@ -114,6 +115,7 @@ class BabelTransformer(Transformer[Any, Any]):
         target = items[0]
         description: str | None = None
         given: dict[str, Any] = {}
+        types: dict[str, str] = {}
         expect: Expectation | None = None
         throws: ThrowsExpectation | None = None
         mocks: list[MockSpec] = []
@@ -134,6 +136,9 @@ class BabelTransformer(Transformer[Any, Any]):
                 description = item[3:]
             elif isinstance(item, dict) and "__given__" in item:
                 given = item["__given__"]
+                # Extract type hints if present
+                if "__types__" in item:
+                    types = item["__types__"]
             elif isinstance(item, Expectation):
                 expect = item
             elif isinstance(item, ThrowsExpectation):
@@ -147,6 +152,7 @@ class BabelTransformer(Transformer[Any, Any]):
             target=target,
             description=description,
             given=given,
+            types=types,
             expect=expect,
             throws=throws,
             mocks=mocks,
@@ -184,8 +190,17 @@ class BabelTransformer(Transformer[Any, Any]):
     # =========================================================================
 
     def given_clause(self, items: list[Any]) -> dict[str, Any]:
-        """GIVEN { ... } - mark with special key."""
-        return {"__given__": items[0]}
+        """GIVEN { ... } - mark with special key, extract types if present."""
+        obj = items[0]
+
+        # Check if object has type hints
+        if isinstance(obj, dict) and "__values__" in obj:
+            return {
+                "__given__": obj["__values__"],
+                "__types__": obj["__types__"],
+            }
+
+        return {"__given__": obj}
 
     # =========================================================================
     # EXPECT clause
@@ -324,16 +339,56 @@ class BabelTransformer(Transformer[Any, Any]):
         return items[0]
 
     # =========================================================================
-    # Values (JSON-like)
+    # Values (JSON-like with type hints)
     # =========================================================================
 
+    def typed_value(self, items: list[Any]) -> dict[str, Any]:
+        """value [AS type] - returns dict with value and optional type."""
+        value = items[0]
+        type_hint = items[1] if len(items) > 1 else None
+        return {"__value__": value, "__type__": type_hint}
+
+    def type_hint(self, items: list[Any]) -> str:
+        """AS type_name - returns the type name."""
+        return items[0]
+
+    @v_args(inline=True)
+    def TYPE_NAME(self, token: Any) -> str:
+        """Type name terminal."""
+        return str(token)
+
+    def typed_object(self, items: list[Any]) -> dict[str, Any]:
+        """{ key: typed_value, ... } - returns dict with values and types."""
+        result: dict[str, Any] = {}
+        types: dict[str, str] = {}
+
+        for item in items:
+            if item is not None:
+                key, typed_val = item
+                # Extract value and type from typed_value
+                if isinstance(typed_val, dict) and "__value__" in typed_val:
+                    result[key] = typed_val["__value__"]
+                    if typed_val["__type__"]:
+                        types[key] = typed_val["__type__"]
+                else:
+                    result[key] = typed_val
+
+        # If there are type hints, wrap the result
+        if types:
+            return {"__values__": result, "__types__": types}
+        return result
+
+    def typed_pair(self, items: list[Any]) -> tuple[str, Any]:
+        """key: typed_value"""
+        return (items[0], items[1])
+
     def object(self, items: list[Any]) -> dict[str, Any]:
-        """{ key: value, ... }"""
+        """{ key: value, ... } - returns plain dict."""
         result: dict[str, Any] = {}
         for item in items:
             if item is not None:
-                key, value = item
-                result[key] = value
+                key, val = item
+                result[key] = val
         return result
 
     def pair(self, items: list[Any]) -> tuple[str, Any]:

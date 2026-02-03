@@ -3,6 +3,7 @@
 Resolves targets like "myapp.services.UserService.get_by_id" and invokes them.
 Uses factory discovery from babel/factories/ to construct class instances.
 Supports mocking via unittest.mock.patch.
+Supports type coercion via AS hints (e.g., { amount: 99.95 AS decimal }).
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+import uuid
 from contextlib import ExitStack
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
@@ -196,10 +200,13 @@ class PythonAdapter(Adapter):
             try:
                 capture.start()
 
+                # Coerce types according to type hints
+                params = self._coerce_types(test.given, test.types)
+
                 # Get the callable and run with timeout support
                 obj, method_name = self.resolve(test.target)
                 method = getattr(obj, method_name)
-                result = run_with_timeout(method, kwargs=test.given, timeout_ms=timeout_ms)
+                result = run_with_timeout(method, kwargs=params, timeout_ms=timeout_ms)
 
                 captured = capture.stop()
                 duration_ms = (time.perf_counter() - start) * 1000
@@ -535,6 +542,112 @@ class PythonAdapter(Adapter):
                 result.append("_")
             result.append(char.lower())
         return "".join(result)
+
+    def _coerce_types(self, given: dict[str, Any], types: dict[str, str]) -> dict[str, Any]:
+        """Coerce values according to type hints.
+
+        Supported types:
+        - int: Convert to int
+        - float: Convert to float
+        - decimal: Convert to Decimal
+        - string: Convert to str
+        - bool: Convert to bool
+        - datetime: Parse ISO format to datetime
+        - date: Parse ISO format to date
+        - time: Parse ISO format to time
+        - uuid: Parse to UUID
+
+        Args:
+            given: Dictionary of parameter values
+            types: Dictionary mapping parameter names to type hints
+
+        Returns:
+            New dictionary with coerced values
+        """
+        if not types:
+            return given
+
+        result = dict(given)
+
+        for key, type_hint in types.items():
+            if key not in result:
+                continue
+
+            value = result[key]
+            try:
+                result[key] = self._coerce_value(value, type_hint)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Cannot coerce '{key}' to {type_hint}: {e}") from e
+
+        return result
+
+    def _coerce_value(self, value: Any, type_hint: str) -> Any:
+        """Coerce a single value to the specified type.
+
+        Args:
+            value: The value to coerce
+            type_hint: The target type name
+
+        Returns:
+            The coerced value
+        """
+        if value is None:
+            return None
+
+        type_hint = type_hint.lower()
+
+        if type_hint == "int":
+            return int(value)
+
+        elif type_hint == "float":
+            return float(value)
+
+        elif type_hint == "decimal":
+            return Decimal(str(value))
+
+        elif type_hint == "string":
+            return str(value)
+
+        elif type_hint == "bool":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ("true", "1", "yes")
+            return bool(value)
+
+        elif type_hint == "datetime":
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str):
+                return datetime.fromisoformat(value)
+            raise ValueError(f"Cannot convert {type(value).__name__} to datetime")
+
+        elif type_hint == "date":
+            if isinstance(value, date) and not isinstance(value, datetime):
+                return value
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, str):
+                return date.fromisoformat(value)
+            raise ValueError(f"Cannot convert {type(value).__name__} to date")
+
+        elif type_hint == "time":
+            if isinstance(value, time):
+                return value
+            if isinstance(value, str):
+                return time.fromisoformat(value)
+            raise ValueError(f"Cannot convert {type(value).__name__} to time")
+
+        elif type_hint == "uuid":
+            if isinstance(value, uuid.UUID):
+                return value
+            if isinstance(value, str):
+                return uuid.UUID(value)
+            raise ValueError(f"Cannot convert {type(value).__name__} to UUID")
+
+        else:
+            # Unknown type hint - return value unchanged
+            return value
 
     # Lifecycle management methods
 

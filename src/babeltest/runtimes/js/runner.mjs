@@ -505,6 +505,121 @@ function cleanupMocks() {
 }
 
 /**
+ * Coerce values according to type hints.
+ *
+ * Supported types:
+ * - int: Convert to integer (parseInt)
+ * - float: Convert to float (parseFloat)
+ * - decimal: Convert to number (JS has no native Decimal)
+ * - string: Convert to string
+ * - bool: Convert to boolean
+ * - datetime: Parse ISO format to Date
+ * - date: Parse ISO format to Date (date only)
+ * - time: Parse to time object {hour, minute, second}
+ * - uuid: Keep as string (no native UUID type)
+ *
+ * @param {Object} given - Dictionary of parameter values
+ * @param {Object} types - Dictionary mapping parameter names to type hints
+ * @returns {Object} - New object with coerced values
+ */
+function coerceTypes(given, types) {
+  if (!types || Object.keys(types).length === 0) {
+    return given;
+  }
+
+  const result = { ...given };
+
+  for (const [key, typeHint] of Object.entries(types)) {
+    if (!(key in result)) continue;
+
+    const value = result[key];
+    try {
+      result[key] = coerceValue(value, typeHint);
+    } catch (error) {
+      throw new Error(`Cannot coerce '${key}' to ${typeHint}: ${error.message}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Coerce a single value to the specified type.
+ *
+ * @param {*} value - The value to coerce
+ * @param {string} typeHint - The target type name
+ * @returns {*} - The coerced value
+ */
+function coerceValue(value, typeHint) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  const hint = typeHint.toLowerCase();
+
+  switch (hint) {
+    case 'int':
+      return parseInt(value, 10);
+
+    case 'float':
+      return parseFloat(value);
+
+    case 'decimal':
+      // JavaScript doesn't have native Decimal, use number
+      // For precise decimal math, consider using a library like decimal.js
+      return parseFloat(value);
+
+    case 'string':
+      return String(value);
+
+    case 'bool':
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        return ['true', '1', 'yes'].includes(value.toLowerCase());
+      }
+      return Boolean(value);
+
+    case 'datetime':
+      if (value instanceof Date) return value;
+      if (typeof value === 'string') return new Date(value);
+      throw new Error(`Cannot convert ${typeof value} to datetime`);
+
+    case 'date':
+      // Create a Date but only use the date part
+      if (value instanceof Date) {
+        return new Date(value.toISOString().split('T')[0]);
+      }
+      if (typeof value === 'string') {
+        // If it's just a date string, use it directly
+        const dateStr = value.includes('T') ? value.split('T')[0] : value;
+        return new Date(dateStr + 'T00:00:00');
+      }
+      throw new Error(`Cannot convert ${typeof value} to date`);
+
+    case 'time':
+      // Return a time object with hour, minute, second
+      if (typeof value === 'string') {
+        const parts = value.split(':');
+        return {
+          hour: parseInt(parts[0], 10),
+          minute: parseInt(parts[1] || '0', 10),
+          second: parseInt(parts[2] || '0', 10),
+        };
+      }
+      throw new Error(`Cannot convert ${typeof value} to time`);
+
+    case 'uuid':
+      // JavaScript doesn't have native UUID, keep as string
+      // Could validate format here if needed
+      return String(value);
+
+    default:
+      // Unknown type hint - return value unchanged
+      return value;
+  }
+}
+
+/**
  * Run a single test.
  */
 async function runTest(test) {
@@ -529,8 +644,9 @@ async function runTest(test) {
   try {
     const { obj, method } = await resolve(test.target);
 
-    // Call the method with params
-    const params = test.given || {};
+    // Call the method with params, applying type coercion
+    const rawParams = test.given || {};
+    const params = coerceTypes(rawParams, test.types || {});
     let result;
 
     // Support both object params and positional params
