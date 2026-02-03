@@ -1,0 +1,38 @@
+# BabelTest services - runs on any adapter
+# Target: example.services
+
+SUITE "UserService" {
+  TARGET example.services.UserService
+
+  TEST .get_by_id AS "returns existing user"
+    GIVEN { user_id: 1 }
+    EXPECT CONTAINS { id: 1, name: "Kohl" }
+
+  TEST .get_by_id AS "returns null for missing user"
+    GIVEN { user_id: 9999 }
+    EXPECT NULL
+
+  TEST .create AS "creates new user"
+    GIVEN { name: "Bob", email: "bob@example.com" }
+    EXPECT CONTAINS { name: "Bob", email: "bob@example.com", active: true }
+
+  TEST .deactivate AS "deactivates existing user"
+    GIVEN { user_id: 1 }
+    EXPECT TRUE
+
+  TEST .deactivate AS "returns false for missing user"
+    GIVEN { user_id: 9999 }
+    EXPECT FALSE
+}
+
+SUITE "Calculator" {
+  TARGET example.services.Calculator
+
+  TEST .add AS "adds via instance method"
+    GIVEN { a: 5, b: 3 }
+    EXPECT 8
+
+  TEST .multiply AS "multiplies via instance method"
+    GIVEN { a: 4, b: 7 }
+    EXPECT 28
+}

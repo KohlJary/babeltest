@@ -1,0 +1,168 @@
+// BabelTest Grammar
+// A declarative, language-agnostic test specification language
+
+// ============================================================================
+// Document structure
+// ============================================================================
+
+start: (_item)*
+
+_item: test
+     | suite
+     | NEWLINE
+
+// ============================================================================
+// Suite definition
+// ============================================================================
+
+suite: "SUITE" STRING "{" suite_body "}"
+
+suite_body: suite_item*
+
+suite_item: target_decl
+          | before_each
+          | after_each
+          | before_all
+          | after_all
+          | test
+          | NEWLINE
+
+target_decl: "TARGET" dotted_name
+
+before_each: "BEFORE" "EACH" block
+after_each: "AFTER" "EACH" block
+before_all: "BEFORE" "ALL" block
+after_all: "AFTER" "ALL" block
+
+block: "{" block_content? "}"
+block_content: /[^{}]+/
+
+// ============================================================================
+// Test definition
+// ============================================================================
+
+test: "TEST" target [as_clause] [with_params] test_body
+
+target: dotted_name
+
+as_clause: "AS" STRING
+
+with_params: "WITH" "PARAMS" array
+
+test_body: test_clause*
+
+test_clause: given_clause
+           | expect_clause
+           | throws_clause
+           | timeout_clause
+           | mock_clause
+           | NEWLINE
+
+// ============================================================================
+// GIVEN clause
+// ============================================================================
+
+given_clause: "GIVEN" object
+
+// ============================================================================
+// EXPECT clause
+// ============================================================================
+
+expect_clause: "EXPECT" expectation
+
+expectation: "CONTAINS" value       -> expect_contains
+           | "TYPE" STRING          -> expect_type
+           | "TRUE"                 -> expect_true
+           | "FALSE"                -> expect_false
+           | "NULL"                 -> expect_null
+           | "NOT" "NULL"           -> expect_not_null
+           | value                  -> expect_exact
+
+// ============================================================================
+// THROWS clause
+// ============================================================================
+
+throws_clause: "THROWS" throws_spec
+
+throws_spec: "ANY"                  -> throws_any
+           | object                 -> throws_object
+
+// ============================================================================
+// TIMEOUT clause
+// ============================================================================
+
+timeout_clause: "TIMEOUT" duration
+
+duration: NUMBER time_unit?
+
+time_unit: TIME_UNIT
+
+TIME_UNIT: "ms" | "s" | "m"
+
+// ============================================================================
+// MOCK clause
+// Single-line mock definition to avoid ambiguity with test GIVEN
+// MOCK target [WHEN matcher] RETURNS value
+// MOCK target [WHEN matcher] THROWS spec
+// ============================================================================
+
+mock_clause: "MOCK" dotted_name [mock_when] mock_result
+
+mock_when: "WHEN" mock_matcher
+mock_matcher: "ANY"                 -> mock_when_any
+            | object                -> mock_when_object
+
+mock_result: mock_returns
+           | mock_throws
+
+mock_returns: "RETURNS" value
+mock_throws: "THROWS" throws_spec
+
+// ============================================================================
+// Values (JSON-like)
+// ============================================================================
+
+?value: object
+      | array
+      | STRING
+      | NUMBER
+      | "true"        -> true
+      | "false"       -> false
+      | "null"        -> null
+      | param_ref
+
+object: "{" [pair ("," pair)*] ","? "}"
+
+pair: key ":" value
+
+key: NAME | STRING
+
+array: "[" [value ("," value)*] ","? "]"
+
+param_ref: "$" NAME
+
+// ============================================================================
+// Identifiers
+// ============================================================================
+
+dotted_name: DOT? NAME (DOT NAME)*
+
+// ============================================================================
+// Terminals
+// ============================================================================
+
+STRING: "\"" /[^"]*/ "\""
+
+NUMBER: /-?[0-9]+(\.[0-9]+)?/
+
+NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+DOT: "."
+
+COMMENT: /#[^\n]*/
+
+NEWLINE: /\r?\n/
+
+%ignore " "
+%ignore "\t"
+%ignore COMMENT

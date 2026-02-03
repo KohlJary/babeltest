@@ -2,6 +2,7 @@
 
 Resolves targets like "myapp.services.UserService.get_by_id" and invokes them.
 Uses factory discovery from babel/factories/ to construct class instances.
+Supports mocking via unittest.mock.patch.
 """
 
 from __future__ import annotations
@@ -9,10 +10,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
 
-from babeltest.adapters.base import Adapter
+from babeltest.adapters.base import Adapter, ResultStatus, TestResult
+from babeltest.compiler.ir import MockSpec, TestSpec
 from babeltest.diagnostics import (
     ConstructionError,
     DiagnosticContext,
@@ -153,6 +157,230 @@ class PythonAdapter(Adapter):
         obj, method_name = self.resolve(target)
         method = getattr(obj, method_name)
         return method(**params)
+
+    def run_test(self, test: TestSpec) -> TestResult:
+        """Run a test with mock support.
+
+        Overrides base implementation to install mocks before test execution.
+        """
+        import time
+
+        from babeltest.async_runner import TimeoutError as BabelTimeoutError
+        from babeltest.async_runner import run_with_timeout
+        from babeltest.capture import OutputCapture
+
+        start = time.perf_counter()
+        capture = OutputCapture(enabled=self.capture_output)
+        logs: list[str] = []
+
+        # Determine timeout
+        timeout_ms = test.timeout_ms if test.timeout_ms is not None else self.default_timeout_ms
+
+        # Use ExitStack to manage mock patches
+        with ExitStack() as stack:
+            # Install mocks
+            mock_objects: dict[str, MagicMock] = {}
+            for mock_spec in test.mocks:
+                try:
+                    mock_obj = self._install_mock(stack, mock_spec)
+                    mock_objects[mock_spec.target] = mock_obj
+                except Exception as e:
+                    duration_ms = (time.perf_counter() - start) * 1000
+                    return TestResult(
+                        test=test,
+                        status=ResultStatus.ERROR,
+                        message=f"Failed to install mock for {mock_spec.target}: {e}",
+                        duration_ms=duration_ms,
+                    )
+
+            try:
+                capture.start()
+
+                # Get the callable and run with timeout support
+                obj, method_name = self.resolve(test.target)
+                method = getattr(obj, method_name)
+                result = run_with_timeout(method, kwargs=test.given, timeout_ms=timeout_ms)
+
+                captured = capture.stop()
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                if captured.has_output:
+                    logs = captured.as_logs()
+
+                # If we expected an exception but didn't get one
+                if test.throws:
+                    return TestResult(
+                        test=test,
+                        status=ResultStatus.FAILED,
+                        message=f"Expected exception {test.throws.type} but call succeeded",
+                        actual_value=result,
+                        duration_ms=duration_ms,
+                        logs=logs,
+                    )
+
+                # Check return value assertion
+                if test.expect:
+                    passed, message = self._check_expectation(result, test.expect)
+                    return TestResult(
+                        test=test,
+                        status=ResultStatus.PASSED if passed else ResultStatus.FAILED,
+                        message=message,
+                        actual_value=result,
+                        expected_value=test.expect.value,
+                        duration_ms=duration_ms,
+                        logs=logs,
+                    )
+
+                # No assertion - just check it didn't throw
+                return TestResult(
+                    test=test,
+                    status=ResultStatus.PASSED,
+                    duration_ms=duration_ms,
+                    logs=logs,
+                )
+
+            except BabelTimeoutError as e:
+                captured = capture.stop()
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                if captured.has_output:
+                    logs = captured.as_logs()
+
+                return TestResult(
+                    test=test,
+                    status=ResultStatus.FAILED,
+                    message=f"Test timed out after {e.timeout_ms}ms",
+                    duration_ms=duration_ms,
+                    logs=logs,
+                )
+
+            except Exception as e:
+                captured = capture.stop()
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                if captured.has_output:
+                    logs = captured.as_logs()
+
+                # If we expected an exception, check it matches
+                if test.throws:
+                    passed, message = self._check_throws(e, test.throws)
+                    return TestResult(
+                        test=test,
+                        status=ResultStatus.PASSED if passed else ResultStatus.FAILED,
+                        message=message,
+                        exception=e,
+                        duration_ms=duration_ms,
+                        logs=logs,
+                    )
+
+                # Unexpected exception
+                return TestResult(
+                    test=test,
+                    status=ResultStatus.ERROR,
+                    message=f"{type(e).__name__}: {e}",
+                    exception=e,
+                    duration_ms=duration_ms,
+                    logs=logs,
+                )
+
+    def _install_mock(self, stack: ExitStack, mock_spec: MockSpec) -> MagicMock:
+        """Install a mock using unittest.mock.patch.
+
+        Args:
+            stack: ExitStack to manage the patch lifecycle
+            mock_spec: Mock specification from the test
+
+        Returns:
+            The MagicMock object that was installed
+        """
+        # Resolve the mock target to a patchable path
+        patch_target = self._resolve_mock_path(mock_spec.target)
+
+        if self.debug_mode:
+            print(f"[DEBUG] Installing mock: {mock_spec.target} -> {patch_target}")
+
+        # Create the mock
+        mock_obj = MagicMock()
+
+        # Configure return value or exception
+        if mock_spec.throws:
+            # Create an exception instance
+            exc_type = mock_spec.throws.type or "Exception"
+            exc_message = mock_spec.throws.message or ""
+
+            # Try to find the exception class, looking in the mock target's module
+            exc_class = self._find_exception_class(exc_type, mock_spec.target)
+            mock_obj.side_effect = exc_class(exc_message)
+
+            if self.debug_mode:
+                print(f"[DEBUG] Mock will throw: {exc_class.__name__}({exc_message!r})")
+        elif mock_spec.returns is not None:
+            mock_obj.return_value = mock_spec.returns
+
+        # Install the patch
+        patcher = patch(patch_target, mock_obj)
+        stack.enter_context(patcher)
+
+        return mock_obj
+
+    def _resolve_mock_path(self, target: str) -> str:
+        """Convert a mock target to a patchable path for unittest.mock.patch.
+
+        The target format is the same as test targets:
+        - "module.function"
+        - "module.Class.method"
+
+        unittest.mock.patch needs the path as a string in the format:
+        "module.submodule.Class.method" or "module.submodule.function"
+        """
+        # The target is already in the right format
+        return target
+
+    def _find_exception_class(self, exc_type: str, mock_target: str | None = None) -> type:
+        """Find an exception class by name.
+
+        Resolution order:
+        1. If exc_type is a dotted path (e.g., "myapp.errors.MyError"), import it
+        2. If mock_target is provided, look in the same module
+        3. Search built-in exceptions
+        4. Fall back to generic Exception
+
+        Args:
+            exc_type: Exception type name or dotted path
+            mock_target: Optional mock target path to infer module location
+        """
+        # 1. If it's a dotted path, try to import directly
+        if "." in exc_type:
+            try:
+                parts = exc_type.rsplit(".", 1)
+                module = importlib.import_module(parts[0])
+                return getattr(module, parts[1])
+            except (ImportError, AttributeError):
+                pass
+
+        # 2. If we have a mock target, look in the same module
+        if mock_target:
+            parts = mock_target.rsplit(".", 2)  # module.Class.method or module.function
+            for i in range(len(parts) - 1, 0, -1):
+                module_path = ".".join(parts[:i])
+                try:
+                    module = importlib.import_module(module_path)
+                    if hasattr(module, exc_type):
+                        cls = getattr(module, exc_type)
+                        if isinstance(cls, type) and issubclass(cls, BaseException):
+                            return cls
+                except ImportError:
+                    continue
+
+        # 3. Check built-ins
+        import builtins
+        if hasattr(builtins, exc_type):
+            cls = getattr(builtins, exc_type)
+            if isinstance(cls, type) and issubclass(cls, BaseException):
+                return cls
+
+        # 4. Default to generic Exception
+        return Exception
 
     def _get_instance(self, class_path: str, cls: type) -> Any:
         """Get or create an instance of a class.

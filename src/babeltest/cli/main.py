@@ -33,16 +33,29 @@ def cli() -> None:
     help="Path to babeltest.yaml config file.",
 )
 @click.option(
+    "--lang",
+    "-l",
+    type=click.Choice(["python", "py", "javascript", "js", "csharp", "cs"]),
+    default="python",
+    help="Target language adapter to use.",
+)
+@click.option(
     "--debug",
     is_flag=True,
     help="Enable debug output.",
 )
-def run(path: Path, project: Path | None, config: Path | None, debug: bool) -> None:
-    """Run tests from an IR JSON file.
+def run(
+    path: Path,
+    project: Path | None,
+    config: Path | None,
+    lang: str,
+    debug: bool,
+) -> None:
+    """Run tests from a .babel or IR JSON file.
 
-    PATH is the path to a JSON file containing the test IR.
+    PATH is the path to a .babel file or JSON file containing the test IR.
     """
-    from babeltest.adapters.python import PythonAdapter
+    from babeltest.compiler.ir import IRDocument
     from babeltest.config import load_config
     from babeltest.runner import format_results, load_ir, run_tests
 
@@ -51,30 +64,71 @@ def run(path: Path, project: Path | None, config: Path | None, debug: bool) -> N
     # Load config
     cfg = load_config(config_path=config, project_root=project_root)
 
+    # Normalize language name
+    if lang in ("python", "py"):
+        lang_norm = "python"
+    elif lang in ("javascript", "js"):
+        lang_norm = "javascript"
+    else:
+        lang_norm = "csharp"
+
     # Override debug mode if flag is set
     if debug:
-        cfg.adapters.python.debug_mode = True
+        if lang_norm == "python":
+            cfg.adapters.python.debug_mode = True
+        elif lang_norm == "javascript":
+            cfg.adapters.javascript.debug_mode = True
+        else:
+            cfg.adapters.csharp.debug_mode = True
 
-    if cfg.adapters.python.debug_mode:
+    show_all_logs = {
+        "python": cfg.adapters.python.debug_mode,
+        "javascript": cfg.adapters.javascript.debug_mode,
+        "csharp": cfg.adapters.csharp.debug_mode,
+    }.get(lang_norm, False)
+
+    if show_all_logs:
         console.print(f"[dim]Config: {cfg.model_dump_json(indent=2)}[/dim]\n")
 
-    # Load IR
+    # Load IR - either from .babel file or JSON
+    ir: IRDocument
     try:
-        ir = load_ir(path)
+        if path.suffix == ".babel":
+            from babeltest.compiler.parser import parse_file
+
+            ir = parse_file(path)
+        else:
+            ir = load_ir(path)
     except Exception as e:
-        console.print(f"[red]Error loading IR:[/red] {e}")
+        console.print(f"[red]Error loading tests:[/red] {e}")
         raise SystemExit(1)
 
-    console.print(f"[dim]Running tests from {path}[/dim]\n")
+    console.print(f"[dim]Running tests from {path} (adapter: {lang_norm})[/dim]\n")
 
-    # Create adapter with config
-    adapter = PythonAdapter(project_root=project_root, config=cfg.adapters.python)
+    # Create adapter based on language
+    if lang_norm == "python":
+        from babeltest.adapters.python import PythonAdapter
+
+        adapter = PythonAdapter(project_root=project_root, config=cfg.adapters.python)
+    elif lang_norm == "javascript":
+        from babeltest.adapters.javascript import JSAdapter
+
+        adapter = JSAdapter(project_root=project_root, config=cfg.adapters.javascript)
+    else:
+        from babeltest.adapters.csharp import CSharpAdapter
+
+        adapter = CSharpAdapter(project_root=project_root, config=cfg.adapters.csharp)
 
     # Run tests
-    results = run_tests(ir, adapter)
+    try:
+        results = run_tests(ir, adapter)
+    finally:
+        # Cleanup JS adapter if used
+        if hasattr(adapter, "shutdown"):
+            adapter.shutdown()
 
     # Format and display results (show all logs in debug mode)
-    output = format_results(results, show_all_logs=cfg.adapters.python.debug_mode)
+    output = format_results(results, show_all_logs=show_all_logs)
 
     # Color the output based on results
     has_failures = any(r.status.value in ("failed", "error") for r in results)
@@ -88,21 +142,66 @@ def run(path: Path, project: Path | None, config: Path | None, debug: bool) -> N
 @cli.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 def check(path: Path) -> None:
-    """Validate an IR JSON file without running tests.
+    """Validate a .babel or IR JSON file without running tests.
 
-    PATH is the path to a JSON file containing the test IR.
+    PATH is the path to a .babel file or JSON file containing the test IR.
     """
+    from babeltest.compiler.ir import IRDocument
     from babeltest.runner import load_ir
 
+    ir: IRDocument
     try:
-        ir = load_ir(path)
+        if path.suffix == ".babel":
+            from babeltest.compiler.parser import parse_file
+
+            ir = parse_file(path)
+        else:
+            ir = load_ir(path)
+
         test_count = len(ir.tests) + sum(len(s.tests) for s in ir.suites)
         suite_count = len(ir.suites)
 
-        console.print(f"[green]\u2713[/green] Valid IR: {test_count} tests in {suite_count} suites")
+        console.print(f"[green]\u2713[/green] Valid: {test_count} tests in {suite_count} suites")
     except Exception as e:
-        console.print(f"[red]\u2717[/red] Invalid IR: {e}")
+        console.print(f"[red]\u2717[/red] Invalid: {e}")
         raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    help="Output file for IR JSON. Defaults to stdout.",
+)
+@click.option(
+    "--pretty",
+    is_flag=True,
+    default=True,
+    help="Pretty-print JSON output (default: true).",
+)
+def compile(path: Path, output: Path | None, pretty: bool) -> None:
+    """Compile a .babel file to IR JSON.
+
+    PATH is the path to a .babel file to compile.
+    """
+    from babeltest.compiler.parser import parse_file
+
+    try:
+        ir = parse_file(path)
+    except Exception as e:
+        console.print(f"[red]Parse error:[/red] {e}")
+        raise SystemExit(1)
+
+    # Convert to JSON
+    json_output = ir.model_dump_json(indent=2 if pretty else None)
+
+    if output:
+        output.write_text(json_output)
+        console.print(f"[green]\u2713[/green] Compiled to {output}")
+    else:
+        console.print(json_output)
 
 
 @cli.command()
