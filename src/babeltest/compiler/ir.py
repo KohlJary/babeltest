@@ -73,6 +73,7 @@ class TestSpec(BaseModel):
     mocks: list[MockSpec] = Field(default_factory=list)  # Mock definitions
     mutates: MutatesSpec | None = None  # Side-effect assertions
     timeout_ms: int | None = None  # Timeout in milliseconds
+    params: list[dict[str, Any]] | None = None  # Parameterized test data
 
 
 class SuiteSpec(BaseModel):
