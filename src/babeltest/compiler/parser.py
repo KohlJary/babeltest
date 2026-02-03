@@ -9,10 +9,12 @@ from typing import Any
 from lark import Lark, Transformer, v_args
 
 from .ir import (
+    CalledAssertion,
     ExpectationType,
     Expectation,
     IRDocument,
     MockSpec,
+    MutatesSpec,
     SuiteSpec,
     TestSpec,
     ThrowsExpectation,
@@ -119,6 +121,7 @@ class BabelTransformer(Transformer[Any, Any]):
         expect: Expectation | None = None
         throws: ThrowsExpectation | None = None
         mocks: list[MockSpec] = []
+        mutates: MutatesSpec | None = None
         timeout_ms: int | None = None
 
         # Flatten items - test_body is the last item and is a list
@@ -145,6 +148,8 @@ class BabelTransformer(Transformer[Any, Any]):
                 throws = item
             elif isinstance(item, MockSpec):
                 mocks.append(item)
+            elif isinstance(item, MutatesSpec):
+                mutates = item
             elif isinstance(item, int) and timeout_ms is None:
                 timeout_ms = item
 
@@ -156,6 +161,7 @@ class BabelTransformer(Transformer[Any, Any]):
             expect=expect,
             throws=throws,
             mocks=mocks,
+            mutates=mutates,
             timeout_ms=timeout_ms,
         )
 
@@ -336,6 +342,50 @@ class BabelTransformer(Transformer[Any, Any]):
 
     def mock_throws(self, items: list[Any]) -> ThrowsExpectation:
         """THROWS ..."""
+        return items[0]
+
+    # =========================================================================
+    # MUTATES clause
+    # =========================================================================
+
+    def mutates_clause(self, items: list[Any]) -> MutatesSpec:
+        """MUTATES { assertions... }"""
+        called: list[CalledAssertion] = []
+
+        for item in items:
+            if item is None:
+                continue
+            if isinstance(item, CalledAssertion):
+                called.append(item)
+
+        return MutatesSpec(called=called)
+
+    def mutates_assertion(self, items: list[Any]) -> Any:
+        """Unwrap single mutates assertion."""
+        return items[0] if items else None
+
+    def called_assertion(self, items: list[Any]) -> CalledAssertion:
+        """CALLED Target.Method [WITH { args }] [TIMES n]"""
+        target = items[0]
+        with_args: dict[str, Any] | None = None
+        times: int | None = None
+
+        for item in items[1:]:
+            if item is None:
+                continue
+            if isinstance(item, dict) and "__called_with__" in item:
+                with_args = item["__called_with__"]
+            elif isinstance(item, int):
+                times = item
+
+        return CalledAssertion(target=target, with_args=with_args, times=times)
+
+    def called_with(self, items: list[Any]) -> dict[str, Any]:
+        """WITH { args }"""
+        return {"__called_with__": items[0]}
+
+    def called_times(self, items: list[Any]) -> int:
+        """TIMES n"""
         return items[0]
 
     # =========================================================================

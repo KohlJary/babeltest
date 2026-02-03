@@ -38,6 +38,9 @@ const factoryCache = new Map();
 // Mock storage for cleanup
 const installedMocks = [];
 
+// Call tracking for CALLED assertions
+const callTracker = new Map(); // target -> [{ args, kwargs }]
+
 /**
  * Log debug message if debug mode is enabled.
  */
@@ -378,8 +381,16 @@ async function installMock(mockSpec) {
               ErrorClass = await findErrorClass(mockSpec.throws.type, mockSpec.target);
             }
 
-            // Create mock function
+            // Create mock function that tracks calls
+            const targetKey = mockSpec.target;
+            if (!callTracker.has(targetKey)) {
+              callTracker.set(targetKey, []);
+            }
+
             const mockFn = function(...args) {
+              // Record the call
+              callTracker.get(targetKey).push({ args });
+
               if (mockSpec.throws) {
                 throw new ErrorClass(mockSpec.throws.message || '');
               }
@@ -390,7 +401,7 @@ async function installMock(mockSpec) {
             cls.prototype[nameVariant] = mockFn;
 
             // Store cleanup info
-            const cleanup = { obj: cls.prototype, methodName: nameVariant, original };
+            const cleanup = { obj: cls.prototype, methodName: nameVariant, original, targetKey };
             installedMocks.push(cleanup);
 
             debug(`  Mock installed on prototype: ${className}.prototype.${nameVariant} -> ${mockSpec.throws ? 'throws' : 'returns'}`);
@@ -416,8 +427,16 @@ async function installMock(mockSpec) {
             ErrorClass = await findErrorClass(mockSpec.throws.type, mockSpec.target);
           }
 
-          // Create mock function
+          // Create mock function that tracks calls
+          const targetKey = mockSpec.target;
+          if (!callTracker.has(targetKey)) {
+            callTracker.set(targetKey, []);
+          }
+
           const mockFn = function(...args) {
+            // Record the call
+            callTracker.get(targetKey).push({ args });
+
             if (mockSpec.throws) {
               throw new ErrorClass(mockSpec.throws.message || '');
             }
@@ -426,7 +445,7 @@ async function installMock(mockSpec) {
 
           obj[nameVariant] = mockFn;
 
-          const cleanup = { obj, methodName: nameVariant, original };
+          const cleanup = { obj, methodName: nameVariant, original, targetKey };
           installedMocks.push(cleanup);
 
           debug(`  Mock installed: ${nameVariant} -> ${mockSpec.throws ? 'throws' : 'returns'}`);
@@ -508,7 +527,7 @@ async function findErrorClass(name, mockTarget) {
 }
 
 /**
- * Clean up all installed mocks.
+ * Clean up all installed mocks and clear call tracking.
  */
 function cleanupMocks() {
   while (installedMocks.length > 0) {
@@ -516,6 +535,183 @@ function cleanupMocks() {
     obj[methodName] = original;
     debug(`  Mock cleaned up: ${methodName}`);
   }
+  callTracker.clear();
+}
+
+/**
+ * Install a spy for call tracking (used for CALLED assertions without mocks).
+ *
+ * @param {string} target - The target path to spy on
+ * @returns {Object} - Cleanup info
+ */
+async function installSpy(target) {
+  debug(`Installing spy for: ${target}`);
+
+  let parts = target.split('.');
+
+  // Map "example." prefix to "example/js/"
+  if (parts[0] === 'example') {
+    parts = ['example', 'js', ...parts.slice(1)];
+  }
+
+  // Initialize call tracking for this target
+  if (!callTracker.has(target)) {
+    callTracker.set(target, []);
+  }
+
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const modulePath = parts.slice(0, i).join('/');
+    const memberPath = parts.slice(i);
+
+    let module;
+    try {
+      module = await importModule(modulePath);
+    } catch (e) {
+      continue;
+    }
+
+    // Class method spy
+    if (memberPath.length === 2) {
+      const className = memberPath[0];
+      const methodName = memberPath[1];
+
+      const cls = module[className] || module.default?.[className];
+      if (typeof cls === 'function' && cls.prototype) {
+        for (const nameVariant of getNameVariants(methodName)) {
+          if (typeof cls.prototype[nameVariant] === 'function') {
+            const original = cls.prototype[nameVariant];
+
+            // Create spy that calls through to original
+            const spyFn = function(...args) {
+              callTracker.get(target).push({ args });
+              return original.apply(this, args);
+            };
+
+            cls.prototype[nameVariant] = spyFn;
+
+            const cleanup = { obj: cls.prototype, methodName: nameVariant, original, targetKey: target };
+            installedMocks.push(cleanup);
+
+            debug(`  Spy installed on prototype: ${className}.prototype.${nameVariant}`);
+            return cleanup;
+          }
+        }
+      }
+    }
+
+    // Module-level function spy
+    if (memberPath.length === 1) {
+      const methodName = memberPath[0];
+
+      for (const nameVariant of getNameVariants(methodName)) {
+        const method = module[nameVariant] || module.default?.[nameVariant];
+        if (typeof method === 'function') {
+          const obj = module.default || module;
+          const original = obj[nameVariant];
+
+          // Create spy that calls through to original
+          const spyFn = function(...args) {
+            callTracker.get(target).push({ args });
+            return original.apply(this, args);
+          };
+
+          obj[nameVariant] = spyFn;
+
+          const cleanup = { obj, methodName: nameVariant, original, targetKey: target };
+          installedMocks.push(cleanup);
+
+          debug(`  Spy installed: ${nameVariant}`);
+          return cleanup;
+        }
+      }
+    }
+  }
+
+  throw new Error(`Cannot install spy for: ${target}`);
+}
+
+/**
+ * Verify CALLED assertions against call tracker.
+ *
+ * @param {Array} assertions - Array of CALLED assertions
+ * @returns {Object} - { passed: boolean, message: string|null }
+ */
+function verifyCalledAssertions(assertions) {
+  for (const assertion of assertions) {
+    const { target, with_args: withArgs, times } = assertion;
+    const calls = callTracker.get(target) || [];
+
+    // Check call count
+    if (times !== undefined && times !== null) {
+      if (calls.length !== times) {
+        return {
+          passed: false,
+          message: `CALLED ${target}: expected ${times} call(s), got ${calls.length}`,
+        };
+      }
+    } else {
+      // At least once
+      if (calls.length === 0) {
+        return {
+          passed: false,
+          message: `CALLED ${target}: expected to be called, but was not`,
+        };
+      }
+    }
+
+    // Check arguments if specified
+    if (withArgs) {
+      let matched = false;
+      for (const call of calls) {
+        if (argsMatch(withArgs, call.args)) {
+          matched = true;
+          break;
+        }
+      }
+
+      if (!matched) {
+        const actualCalls = calls.map(c => JSON.stringify(c.args)).join(', ');
+        return {
+          passed: false,
+          message: `CALLED ${target} WITH ${JSON.stringify(withArgs)}: no matching call found. Actual calls: [${actualCalls}]`,
+        };
+      }
+    }
+  }
+
+  return { passed: true, message: null };
+}
+
+/**
+ * Check if expected args match actual call args.
+ * Supports partial matching - expected is checked against each positional arg.
+ */
+function argsMatch(expected, actualArgs) {
+  // Try to match expected object properties against actual args
+  // For JS, args are typically passed positionally, but we check if any arg
+  // contains the expected properties
+  for (const arg of actualArgs) {
+    if (typeof arg === 'object' && arg !== null) {
+      let allMatch = true;
+      for (const [key, value] of Object.entries(expected)) {
+        if (arg[key] !== value) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) return true;
+    }
+  }
+
+  // Also check if expected matches a single positional arg by value
+  for (const [key, value] of Object.entries(expected)) {
+    const idx = parseInt(key, 10);
+    if (!isNaN(idx) && actualArgs[idx] === value) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -639,6 +835,9 @@ function coerceValue(value, typeHint) {
 async function runTest(test) {
   const startTime = performance.now();
 
+  // Collect mock targets for checking if spy is needed
+  const mockTargets = new Set((test.mocks || []).map(m => m.target));
+
   // Install mocks before running the test
   try {
     if (test.mocks && test.mocks.length > 0) {
@@ -651,6 +850,24 @@ async function runTest(test) {
     return {
       status: 'error',
       message: `Failed to install mock: ${error.message}`,
+      duration_ms: performance.now() - startTime,
+    };
+  }
+
+  // Install spies for CALLED assertions that don't have corresponding mocks
+  try {
+    if (test.mutates && test.mutates.called) {
+      for (const assertion of test.mutates.called) {
+        if (!mockTargets.has(assertion.target)) {
+          await installSpy(assertion.target);
+        }
+      }
+    }
+  } catch (error) {
+    cleanupMocks();
+    return {
+      status: 'error',
+      message: `Failed to install spy: ${error.message}`,
       duration_ms: performance.now() - startTime,
     };
   }
@@ -686,6 +903,20 @@ async function runTest(test) {
         actual: result,
         duration_ms: duration,
       };
+    }
+
+    // Check CALLED assertions (MUTATES)
+    if (test.mutates && test.mutates.called) {
+      const { passed, message } = verifyCalledAssertions(test.mutates.called);
+      if (!passed) {
+        cleanupMocks();
+        return {
+          status: 'failed',
+          message,
+          actual: result,
+          duration_ms: duration,
+        };
+      }
     }
 
     // Check expectation

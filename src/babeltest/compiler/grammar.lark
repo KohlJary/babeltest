@@ -56,6 +56,7 @@ test_clause: given_clause
            | throws_clause
            | timeout_clause
            | mock_clause
+           | mutates_clause
            | NEWLINE
 
 // ============================================================================
@@ -117,6 +118,23 @@ mock_result: mock_returns
 
 mock_returns: "RETURNS" value
 mock_throws: "THROWS" throws_spec
+
+// ============================================================================
+// MUTATES clause
+// Side-effect assertions: verify calls were made, events emitted, etc.
+// Phase 1: CALLED assertions only
+// ============================================================================
+
+mutates_clause: "MUTATES" "{" mutates_assertion+ "}"
+
+mutates_assertion: called_assertion
+                 | NEWLINE
+
+called_assertion: "CALLED" dotted_name [called_with] [called_times]
+
+called_with: "WITH" object
+
+called_times: "TIMES" NUMBER
 
 // ============================================================================
 // Values (JSON-like with optional type hints in GIVEN objects)
