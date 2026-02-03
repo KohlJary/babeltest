@@ -1,0 +1,18 @@
+# BabelTest mocking tests
+# Tests the MOCK clause functionality
+# Syntax: MOCK target [WHEN matcher] RETURNS value
+#         MOCK target [WHEN matcher] THROWS { type: "..." }
+
+SUITE "OrderService with mocks" {
+  TARGET example.payment.OrderService
+
+  TEST .place_order AS "successful payment returns placed order"
+    MOCK example.payment.PaymentGateway.charge WHEN ANY RETURNS { transaction_id: "txn_123", status: "success" }
+    GIVEN { user_id: 1, amount: 99.99, card_token: "tok_visa" }
+    EXPECT CONTAINS { status: "placed", total: 99.99 }
+
+  TEST .place_order AS "declined payment returns declined order"
+    MOCK example.payment.PaymentGateway.charge WHEN ANY THROWS { type: "PaymentDeclined", message: "Card declined" }
+    GIVEN { user_id: 1, amount: 99.99, card_token: "tok_declined" }
+    EXPECT CONTAINS { status: "declined" }
+}

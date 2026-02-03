@@ -101,20 +101,20 @@ TIME_UNIT: "ms" | "s" | "m"
 
 // ============================================================================
 // MOCK clause
+// Single-line mock definition to avoid ambiguity with test GIVEN
+// MOCK target [WHEN matcher] RETURNS value
+// MOCK target [WHEN matcher] THROWS spec
 // ============================================================================
 
-mock_clause: "MOCK" dotted_name mock_body
+mock_clause: "MOCK" dotted_name [mock_when] mock_result
 
-mock_body: mock_item*
+mock_when: "WHEN" mock_matcher
+mock_matcher: "ANY"                 -> mock_when_any
+            | object                -> mock_when_object
 
-mock_item: mock_given
-         | mock_returns
-         | mock_throws
-         | NEWLINE
+mock_result: mock_returns
+           | mock_throws
 
-mock_given: "GIVEN" mock_given_spec
-mock_given_spec: "ANY"              -> mock_given_any
-               | object             -> mock_given_object
 mock_returns: "RETURNS" value
 mock_throws: "THROWS" throws_spec
 

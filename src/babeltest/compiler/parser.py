@@ -275,11 +275,13 @@ class BabelTransformer(Transformer[Any, Any]):
         return str(token)
 
     # =========================================================================
-    # MOCK clause
+    # MOCK clause (single-line format)
+    # MOCK target [WHEN matcher] RETURNS value
+    # MOCK target [WHEN matcher] THROWS spec
     # =========================================================================
 
     def mock_clause(self, items: list[Any]) -> MockSpec:
-        """MOCK Target.Method ..."""
+        """MOCK Target.Method [WHEN matcher] RETURNS/THROWS ..."""
         target = items[0]
         given: dict[str, Any] | str = "any"
         returns: Any = None
@@ -288,8 +290,8 @@ class BabelTransformer(Transformer[Any, Any]):
         for item in items[1:]:
             if item is None:
                 continue
-            if isinstance(item, dict) and "__mock_given__" in item:
-                given = item["__mock_given__"]
+            if isinstance(item, dict) and "__mock_when__" in item:
+                given = item["__mock_when__"]
             elif isinstance(item, dict) and "__mock_returns__" in item:
                 returns = item["__mock_returns__"]
             elif isinstance(item, ThrowsExpectation):
@@ -297,17 +299,21 @@ class BabelTransformer(Transformer[Any, Any]):
 
         return MockSpec(target=target, given=given, returns=returns, throws=throws)
 
-    def mock_body(self, items: list[Any]) -> list[Any]:
-        """Collect mock items."""
-        return items
+    def mock_when(self, items: list[Any]) -> dict[str, Any]:
+        """WHEN matcher - pass through."""
+        return items[0]
 
-    def mock_given_any(self, _items: list[Any]) -> dict[str, Any]:
-        """GIVEN ANY"""
-        return {"__mock_given__": "any"}
+    def mock_when_any(self, _items: list[Any]) -> dict[str, Any]:
+        """WHEN ANY"""
+        return {"__mock_when__": "any"}
 
-    def mock_given_object(self, items: list[Any]) -> dict[str, Any]:
-        """GIVEN { ... }"""
-        return {"__mock_given__": items[0]}
+    def mock_when_object(self, items: list[Any]) -> dict[str, Any]:
+        """WHEN { ... }"""
+        return {"__mock_when__": items[0]}
+
+    def mock_result(self, items: list[Any]) -> Any:
+        """Pass through mock result (RETURNS or THROWS)."""
+        return items[0]
 
     def mock_returns(self, items: list[Any]) -> dict[str, Any]:
         """RETURNS <value>"""

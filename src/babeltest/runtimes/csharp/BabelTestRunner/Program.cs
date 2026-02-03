@@ -2,6 +2,8 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+// DispatchProxy is built into .NET for creating dynamic proxies
+
 namespace BabelTestRunner;
 
 /// <summary>
@@ -19,6 +21,7 @@ public class Program
     private static Config _config = new();
     private static readonly Dictionary<string, object> InstanceCache = new();
     private static readonly Dictionary<string, Assembly> AssemblyCache = new();
+    private static readonly List<MockSpec> ActiveMocks = new();
     private static bool _debug;
 
     public static async Task Main(string[] args)
@@ -96,6 +99,19 @@ public class Program
     {
         var startTime = DateTime.UtcNow;
 
+        // Install mocks
+        ActiveMocks.Clear();
+        if (test.Mocks != null && test.Mocks.Count > 0)
+        {
+            foreach (var mock in test.Mocks)
+            {
+                ActiveMocks.Add(mock);
+                Debug($"Mock registered: {mock.Target} -> {(mock.Throws != null ? "throws" : "returns")}");
+            }
+            // Clear instance cache so mocks take effect on new instances
+            InstanceCache.Clear();
+        }
+
         try
         {
             var (obj, method) = await Resolve(test.Target);
@@ -103,9 +119,19 @@ public class Program
             // Build parameters
             var parameters = BuildParameters(method, test.Given);
 
-            // Invoke the method
+            // Check if this method call is mocked
+            var mockResult = CheckForMock(test.Target, parameters);
             object? result;
-            if (method.ReturnType.IsAssignableTo(typeof(Task)))
+
+            if (mockResult.HasValue)
+            {
+                if (mockResult.Value.ShouldThrow)
+                {
+                    throw mockResult.Value.Exception!;
+                }
+                result = mockResult.Value.ReturnValue;
+            }
+            else if (method.ReturnType.IsAssignableTo(typeof(Task)))
             {
                 // Async method
                 var task = (Task)method.Invoke(obj, parameters)!;
@@ -350,24 +376,105 @@ public class Program
             return cached;
         }
 
-        // Try factory first
-        var instance = await TryFactory(type);
-        if (instance != null)
+        // Check if any constructor parameters have mocks - if so, create with mocks
+        var ctors = type.GetConstructors();
+        foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length))
         {
-            InstanceCache[cacheKey] = instance;
-            return instance;
+            var parameters = ctor.GetParameters();
+            var args = new object?[parameters.Length];
+            bool canUseCtor = true;
+            bool hasMockedParam = false;
+
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                var param = parameters[i];
+                var mock = GetMockForType(param.ParameterType);
+
+                if (mock != null)
+                {
+                    args[i] = mock;
+                    hasMockedParam = true;
+                    Debug($"Injecting mock for {param.ParameterType.Name} into {type.Name}");
+                }
+                else if (param.ParameterType.IsInterface)
+                {
+                    // Can't create interface instance without mock
+                    canUseCtor = false;
+                    break;
+                }
+                else if (param.HasDefaultValue)
+                {
+                    args[i] = param.DefaultValue;
+                }
+                else
+                {
+                    canUseCtor = false;
+                    break;
+                }
+            }
+
+            if (canUseCtor && hasMockedParam)
+            {
+                var instance = ctor.Invoke(args);
+                InstanceCache[cacheKey] = instance;
+                return instance;
+            }
+        }
+
+        // Try factory
+        var factoryInstance = await TryFactory(type);
+        if (factoryInstance != null)
+        {
+            InstanceCache[cacheKey] = factoryInstance;
+            return factoryInstance;
         }
 
         // Try parameterless constructor
-        var ctor = type.GetConstructor(Type.EmptyTypes);
-        if (ctor != null)
+        var defaultCtor = type.GetConstructor(Type.EmptyTypes);
+        if (defaultCtor != null)
         {
-            instance = ctor.Invoke(null);
+            var instance = defaultCtor.Invoke(null);
             InstanceCache[cacheKey] = instance;
             return instance;
         }
 
         throw new Exception($"Cannot construct {type.Name}: no parameterless constructor and no factory found");
+    }
+
+    private static object? GetMockForType(Type interfaceType)
+    {
+        // Check if any active mock targets this type
+        foreach (var mock in ActiveMocks)
+        {
+            var mockTypeName = GetTypeNameFromTarget(mock.Target);
+            if (interfaceType.Name == mockTypeName ||
+                interfaceType.Name == $"I{mockTypeName}" ||
+                mockTypeName == interfaceType.Name.TrimStart('I'))
+            {
+                Debug($"Creating mock for {interfaceType.Name} based on mock target {mock.Target}");
+                return CreateMockProxy(interfaceType, mock);
+            }
+        }
+        return null;
+    }
+
+    private static string GetTypeNameFromTarget(string target)
+    {
+        // Extract class name from target like "example.payment.PaymentGateway.Charge"
+        var parts = target.Split('.');
+        if (parts.Length >= 2)
+        {
+            return parts[^2]; // Second to last is the class name
+        }
+        return parts[0];
+    }
+
+    private static object CreateMockProxy(Type interfaceType, MockSpec mock)
+    {
+        // Create a simple mock using DispatchProxy
+        var proxyType = typeof(MockProxy<>).MakeGenericType(interfaceType);
+        var createMethod = proxyType.GetMethod("CreateMock", BindingFlags.Public | BindingFlags.Static);
+        return createMethod!.Invoke(null, new object[] { mock })!;
     }
 
     private static async Task<object?> TryFactory(Type type)
@@ -624,8 +731,77 @@ public class Program
         {
             case "clear_cache":
                 InstanceCache.Clear();
+                ActiveMocks.Clear();
                 break;
         }
+    }
+
+    private struct MockResult
+    {
+        public bool ShouldThrow;
+        public Exception? Exception;
+        public object? ReturnValue;
+    }
+
+    private static MockResult? CheckForMock(string target, object?[] parameters)
+    {
+        // Check if the exact target has a mock
+        foreach (var mock in ActiveMocks)
+        {
+            if (NormalizePath(mock.Target) == NormalizePath(target))
+            {
+                Debug($"Mock matched for direct target: {target}");
+
+                if (mock.Throws != null)
+                {
+                    var exceptionType = FindExceptionType(mock.Throws.Type);
+                    var exception = (Exception)Activator.CreateInstance(exceptionType, mock.Throws.Message ?? "")!;
+                    return new MockResult { ShouldThrow = true, Exception = exception };
+                }
+
+                if (mock.Returns.HasValue)
+                {
+                    return new MockResult { ReturnValue = JsonElementToObject(mock.Returns.Value) };
+                }
+
+                return new MockResult { ReturnValue = null };
+            }
+        }
+
+        return null;
+    }
+
+    private static string NormalizePath(string path)
+    {
+        // Normalize case and remove "example." prefix for comparison
+        return path.ToLowerInvariant().Replace("example.", "");
+    }
+
+    private static Type FindExceptionType(string? typeName)
+    {
+        if (string.IsNullOrEmpty(typeName)) return typeof(Exception);
+
+        // Check common exception types
+        var commonTypes = new[] { typeof(Exception), typeof(ArgumentException), typeof(InvalidOperationException) };
+        foreach (var type in commonTypes)
+        {
+            if (type.Name == typeName) return type;
+        }
+
+        // Search in loaded assemblies
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in asm.GetTypes())
+            {
+                if (type.Name == typeName && typeof(Exception).IsAssignableFrom(type))
+                {
+                    return type;
+                }
+            }
+        }
+
+        // Return generic Exception with custom name
+        return typeof(Exception);
     }
 
     private static bool JsonEquals(object? actual, JsonElement expected)
@@ -701,6 +877,15 @@ public class TestSpec
     public Expectation? Expect { get; set; }
     public ThrowsExpectation? Throws { get; set; }
     public int? TimeoutMs { get; set; }
+    public List<MockSpec>? Mocks { get; set; }
+}
+
+public class MockSpec
+{
+    public string Target { get; set; } = "";
+    public object? Given { get; set; }
+    public JsonElement? Returns { get; set; }
+    public ThrowsExpectation? Throws { get; set; }
 }
 
 public class Expectation
@@ -731,4 +916,96 @@ public class ErrorInfo
     public string? Type { get; set; }
     public string? Message { get; set; }
     public string? Stack { get; set; }
+}
+
+/// <summary>
+/// Dynamic proxy for mocking interfaces.
+/// </summary>
+public class MockProxy<T> : DispatchProxy where T : class
+{
+    private MockSpec? _mock;
+
+    public static T CreateMock(MockSpec mock)
+    {
+        var proxy = Create<T, MockProxy<T>>();
+        ((MockProxy<T>)(object)proxy)._mock = mock;
+        return proxy;
+    }
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (_mock == null) return null;
+
+        // Extract method name from mock target
+        var targetParts = _mock.Target.Split('.');
+        var mockMethodName = targetParts.LastOrDefault()?.ToLowerInvariant();
+        var actualMethodName = targetMethod?.Name.ToLowerInvariant();
+
+        // Check if this method matches the mock
+        if (mockMethodName == actualMethodName ||
+            ConvertSnakeCase(mockMethodName) == actualMethodName)
+        {
+            if (_mock.Throws != null)
+            {
+                var exceptionType = FindExceptionType(_mock.Throws.Type);
+                throw (Exception)Activator.CreateInstance(exceptionType, _mock.Throws.Message ?? "")!;
+            }
+
+            if (_mock.Returns.HasValue)
+            {
+                return ConvertReturnValue(_mock.Returns.Value, targetMethod?.ReturnType);
+            }
+
+            return null;
+        }
+
+        // For other methods, return default
+        return targetMethod?.ReturnType.IsValueType == true
+            ? Activator.CreateInstance(targetMethod.ReturnType)
+            : null;
+    }
+
+    private static string ConvertSnakeCase(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        return string.Concat(name.Split('_').Select((s, i) =>
+            i == 0 ? s : char.ToUpper(s[0]) + s[1..]));
+    }
+
+    private static Type FindExceptionType(string? typeName)
+    {
+        if (string.IsNullOrEmpty(typeName)) return typeof(Exception);
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in asm.GetTypes())
+            {
+                if (type.Name == typeName && typeof(Exception).IsAssignableFrom(type))
+                {
+                    return type;
+                }
+            }
+        }
+
+        return typeof(Exception);
+    }
+
+    private static object? ConvertReturnValue(JsonElement element, Type? targetType)
+    {
+        if (targetType == null) return null;
+
+        return element.ValueKind switch
+        {
+            JsonValueKind.Null => null,
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Number when targetType == typeof(int) => element.GetInt32(),
+            JsonValueKind.Number when targetType == typeof(double) => element.GetDouble(),
+            JsonValueKind.Number => element.GetDouble(),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Object when targetType == typeof(Dictionary<string, object>) =>
+                JsonSerializer.Deserialize<Dictionary<string, object>>(element.GetRawText()),
+            _ => JsonSerializer.Deserialize(element.GetRawText(), targetType)
+        };
+    }
 }

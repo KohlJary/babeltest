@@ -35,6 +35,9 @@ let config = {
 const instanceCache = new Map();
 const factoryCache = new Map();
 
+// Mock storage for cleanup
+const installedMocks = [];
+
 /**
  * Log debug message if debug mode is enabled.
  */
@@ -134,6 +137,28 @@ function parseTarget(target) {
  */
 function toCamelCase(name) {
   return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
+/**
+ * Convert snake_case to camelCase.
+ */
+function snakeToCamel(name) {
+  return name.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
+}
+
+/**
+ * Get all naming variants for a method name.
+ * Tries the original name, then snake_case -> camelCase conversion.
+ */
+function getNameVariants(name) {
+  const variants = [name];
+
+  // If it looks like snake_case, add camelCase variant
+  if (name.includes('_')) {
+    variants.push(snakeToCamel(name));
+  }
+
+  return variants;
 }
 
 /**
@@ -268,14 +293,18 @@ async function resolve(target) {
       }
 
       const methodName = memberPath[memberPath.length - 1];
-      const method = obj[methodName] || obj.default?.[methodName];
 
-      if (typeof method !== 'function') {
-        throw new Error(`'${methodName}' is not a function`);
+      // Try different naming conventions (snake_case -> camelCase)
+      for (const nameVariant of getNameVariants(methodName)) {
+        const method = obj[nameVariant] || obj.default?.[nameVariant];
+
+        if (typeof method === 'function') {
+          debug(`  Resolved: ${modulePath} -> ${memberPath.slice(0, -1).join('.')}.${nameVariant}`);
+          return { obj, method, methodName: nameVariant };
+        }
       }
 
-      debug(`  Resolved: ${modulePath} -> ${memberPath.join('.')}`);
-      return { obj, method, methodName };
+      throw new Error(`'${methodName}' is not a function`);
 
     } catch (e) {
       debug(`  Navigation failed: ${e.message}`);
@@ -287,10 +316,215 @@ async function resolve(target) {
 }
 
 /**
+ * Install a mock for a target.
+ *
+ * @param {Object} mockSpec - The mock specification
+ * @returns {Object} - Cleanup info for restoring the original
+ */
+async function installMock(mockSpec) {
+  debug(`Installing mock for: ${mockSpec.target}`);
+
+  // Parse the mock target to find the class/module and method
+  let parts = mockSpec.target.split('.');
+
+  // Map "example." prefix to "example/js/" for unified test files
+  if (parts[0] === 'example') {
+    parts = ['example', 'js', ...parts.slice(1)];
+  }
+
+  // Try to find the class/module and method
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const modulePath = parts.slice(0, i).join('/');
+    const memberPath = parts.slice(i);
+
+    debug(`  Mock trying: module=${modulePath}, members=${memberPath.join('.')}`);
+
+    let module;
+    try {
+      module = await importModule(modulePath);
+    } catch (e) {
+      continue;
+    }
+
+    // If there's a class name, mock on the prototype
+    if (memberPath.length === 2) {
+      const className = memberPath[0];
+      const methodName = memberPath[1];
+
+      const cls = module[className] || module.default?.[className];
+      if (typeof cls === 'function' && cls.prototype) {
+        // Try both the original method name and camelCase variant
+        for (const nameVariant of getNameVariants(methodName)) {
+          if (typeof cls.prototype[nameVariant] === 'function') {
+            const original = cls.prototype[nameVariant];
+
+            // Pre-resolve the error class if needed
+            let ErrorClass = null;
+            if (mockSpec.throws) {
+              ErrorClass = await findErrorClass(mockSpec.throws.type, mockSpec.target);
+            }
+
+            // Create mock function
+            const mockFn = function(...args) {
+              if (mockSpec.throws) {
+                throw new ErrorClass(mockSpec.throws.message || '');
+              }
+              return mockSpec.returns;
+            };
+
+            // Install on prototype (affects all instances)
+            cls.prototype[nameVariant] = mockFn;
+
+            // Store cleanup info
+            const cleanup = { obj: cls.prototype, methodName: nameVariant, original };
+            installedMocks.push(cleanup);
+
+            debug(`  Mock installed on prototype: ${className}.prototype.${nameVariant} -> ${mockSpec.throws ? 'throws' : 'returns'}`);
+            return cleanup;
+          }
+        }
+      }
+    }
+
+    // Fall back to module-level function
+    if (memberPath.length === 1) {
+      const methodName = memberPath[0];
+
+      for (const nameVariant of getNameVariants(methodName)) {
+        const method = module[nameVariant] || module.default?.[nameVariant];
+        if (typeof method === 'function') {
+          const obj = module.default || module;
+          const original = obj[nameVariant];
+
+          // Pre-resolve the error class if needed
+          let ErrorClass = null;
+          if (mockSpec.throws) {
+            ErrorClass = await findErrorClass(mockSpec.throws.type, mockSpec.target);
+          }
+
+          // Create mock function
+          const mockFn = function(...args) {
+            if (mockSpec.throws) {
+              throw new ErrorClass(mockSpec.throws.message || '');
+            }
+            return mockSpec.returns;
+          };
+
+          obj[nameVariant] = mockFn;
+
+          const cleanup = { obj, methodName: nameVariant, original };
+          installedMocks.push(cleanup);
+
+          debug(`  Mock installed: ${nameVariant} -> ${mockSpec.throws ? 'throws' : 'returns'}`);
+          return cleanup;
+        }
+      }
+    }
+  }
+
+  throw new Error(`Cannot resolve mock target: ${mockSpec.target}`);
+}
+
+/**
+ * Cache for resolved error classes from modules.
+ */
+const errorClassCache = new Map();
+
+/**
+ * Find an error class by name.
+ * Searches in the module that's being mocked, then falls back to global errors.
+ */
+async function findErrorClass(name, mockTarget) {
+  if (!name) return Error;
+
+  // Check global error types first
+  const globalErrors = {
+    Error, TypeError, RangeError, ReferenceError, SyntaxError, URIError,
+  };
+
+  if (globalErrors[name]) return globalErrors[name];
+
+  // Try to find the error class in the mock target's module
+  if (mockTarget) {
+    let parts = mockTarget.split('.');
+
+    // Map "example." prefix to "example/js/"
+    if (parts[0] === 'example') {
+      parts = ['example', 'js', ...parts.slice(1)];
+    }
+
+    // Try progressively shorter module paths
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const modulePath = parts.slice(0, i).join('/');
+
+      // Check cache
+      const cacheKey = `${modulePath}:${name}`;
+      if (errorClassCache.has(cacheKey)) {
+        const cached = errorClassCache.get(cacheKey);
+        if (cached) return cached;
+        continue;  // Cache says it's not in this module
+      }
+
+      try {
+        const module = await importModule(modulePath);
+        const ErrorClass = module[name] || module.default?.[name];
+
+        if (typeof ErrorClass === 'function' && ErrorClass.prototype instanceof Error) {
+          errorClassCache.set(cacheKey, ErrorClass);
+          debug(`  Found error class ${name} in ${modulePath}`);
+          return ErrorClass;
+        }
+
+        // Mark as not found in cache to avoid re-checking
+        errorClassCache.set(cacheKey, null);
+      } catch (e) {
+        errorClassCache.set(cacheKey, null);
+      }
+    }
+  }
+
+  // Return generic Error but set the name property
+  class CustomError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = name;
+    }
+  }
+  return CustomError;
+}
+
+/**
+ * Clean up all installed mocks.
+ */
+function cleanupMocks() {
+  while (installedMocks.length > 0) {
+    const { obj, methodName, original } = installedMocks.pop();
+    obj[methodName] = original;
+    debug(`  Mock cleaned up: ${methodName}`);
+  }
+}
+
+/**
  * Run a single test.
  */
 async function runTest(test) {
   const startTime = performance.now();
+
+  // Install mocks before running the test
+  try {
+    if (test.mocks && test.mocks.length > 0) {
+      for (const mockSpec of test.mocks) {
+        await installMock(mockSpec);
+      }
+    }
+  } catch (error) {
+    cleanupMocks();
+    return {
+      status: 'error',
+      message: `Failed to install mock: ${error.message}`,
+      duration_ms: performance.now() - startTime,
+    };
+  }
 
   try {
     const { obj, method } = await resolve(test.target);
@@ -315,6 +549,7 @@ async function runTest(test) {
 
     // If we expected a throw but didn't get one
     if (test.throws) {
+      cleanupMocks();
       return {
         status: 'failed',
         message: `Expected exception ${test.throws.type || 'any'} but call succeeded`,
@@ -325,6 +560,7 @@ async function runTest(test) {
 
     // Check expectation
     if (test.expect) {
+      cleanupMocks();
       const { passed, message } = checkExpectation(result, test.expect);
       return {
         status: passed ? 'passed' : 'failed',
@@ -336,6 +572,7 @@ async function runTest(test) {
     }
 
     // No assertion - just check it didn't throw
+    cleanupMocks();
     return {
       status: 'passed',
       actual: result,
@@ -343,6 +580,7 @@ async function runTest(test) {
     };
 
   } catch (error) {
+    cleanupMocks();
     const duration = performance.now() - startTime;
 
     // If we expected a throw, check it matches

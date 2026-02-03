@@ -215,6 +215,7 @@ class CSharpAdapter(Adapter):
                     "expect": test.expect.model_dump() if test.expect else None,
                     "throws": test.throws.model_dump() if test.throws else None,
                     "timeout_ms": test.timeout_ms,
+                    "mocks": [m.model_dump() for m in test.mocks] if test.mocks else [],
                 },
             })
 
